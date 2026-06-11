@@ -1,0 +1,20 @@
+# One idempotent sweep over the watched folder. Pair with transcriptd.timer.
+# Install: copy to /etc/systemd/system/, adjust paths, then
+#   systemctl daemon-reload && systemctl enable --now transcriptd.timer
+[Unit]
+Description=transcriptd: transcribe new/changed files to markdown
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust: binary location, watched folder, and the user that owns the folder.
+ExecStart=/usr/local/bin/transcriptd --folder /srv/notes scan
+User=notes
+# Provide OPENROUTER_API_KEY (or whatever api_key_env names in config.toml).
+EnvironmentFile=/etc/transcriptd/env
+# The daemon only needs to write inside the watched folder.
+ProtectSystem=strict
+ReadWritePaths=/srv/notes
+PrivateTmp=true
+NoNewPrivileges=true
