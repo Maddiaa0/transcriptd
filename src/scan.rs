@@ -8,7 +8,7 @@ use walkdir::{DirEntry, WalkDir};
 
 use crate::config::Config;
 use crate::extract;
-use crate::openrouter::{self, Payload, Transcriber, TranscribeInput};
+use crate::openrouter::{self, Payload, TranscribeInput, Transcriber};
 use crate::state::{now_rfc3339, write_atomic, Failures, Ledger, LedgerEntry, StateDir};
 
 #[derive(Debug, Default)]

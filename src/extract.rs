@@ -5,8 +5,7 @@ use std::path::Path;
 /// Pull the text out of a .docx (a zip containing word/document.xml). The
 /// result is rough plain text; the model does the markdown formatting.
 pub fn docx_to_text(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path)
-        .with_context(|| format!("opening {}", path.display()))?;
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
     let mut zip = zip::ZipArchive::new(file)
         .with_context(|| format!("{} is not a valid docx archive", path.display()))?;
     let mut xml = String::new();

@@ -181,8 +181,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let global = dir.path().join("global.toml");
         let folder = dir.path().join("folder.toml");
-        std::fs::write(&global, "model = \"global/model\"\napi_key = \"sk-or-global\"\n").unwrap();
-        std::fs::write(&folder, "model = \"folder/model\"\nstability_seconds = 60\n").unwrap();
+        std::fs::write(
+            &global,
+            "model = \"global/model\"\napi_key = \"sk-or-global\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &folder,
+            "model = \"folder/model\"\nstability_seconds = 60\n",
+        )
+        .unwrap();
 
         let cfg = Config::load_layered(&[global, folder]).unwrap();
         assert_eq!(cfg.model, "folder/model");

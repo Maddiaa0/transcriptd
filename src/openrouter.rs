@@ -94,7 +94,8 @@ impl Transcriber for OpenRouterClient {
             }),
         };
         if matches!(input.payload, Payload::Pdf { .. }) {
-            body["plugins"] = json!([{ "id": "file-parser", "pdf": { "engine": self.pdf_engine } }]);
+            body["plugins"] =
+                json!([{ "id": "file-parser", "pdf": { "engine": self.pdf_engine } }]);
         }
 
         let resp = self

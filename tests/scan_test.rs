@@ -7,7 +7,7 @@ use std::io::Write as _;
 use std::path::Path;
 
 use transcriptd::config::Config;
-use transcriptd::openrouter::{Payload, Transcriber, TranscribeInput, TranscribeOutput};
+use transcriptd::openrouter::{Payload, TranscribeInput, TranscribeOutput, Transcriber};
 use transcriptd::scan::{scan, sidecar_path};
 use transcriptd::state::{Failures, StateDir};
 
@@ -138,7 +138,9 @@ fn ae4_failure_writes_no_sidecar_and_is_retried_next_sweep() {
 
     let failures = Failures::load(&state).unwrap();
     assert_eq!(failures.entries.len(), 1);
-    assert!(failures.entries["bad.png"].last_error.contains("mock API error"));
+    assert!(failures.entries["bad.png"]
+        .last_error
+        .contains("mock API error"));
 
     // Next sweep retries; once the API recovers, the sidecar appears and the
     // failure record clears.
@@ -156,7 +158,11 @@ fn ae5_marked_folder_gets_rollup_and_incremental_page_restitches_from_cache() {
     let state = setup(tmp.path());
     let doc = tmp.path().join("notebook");
     fs::create_dir(&doc).unwrap();
-    fs::write(doc.join("index.md"), format!("# Notebook\n\n{}\n", cfg.marker)).unwrap();
+    fs::write(
+        doc.join("index.md"),
+        format!("# Notebook\n\n{}\n", cfg.marker),
+    )
+    .unwrap();
     fs::write(doc.join("01.png"), b"page one").unwrap();
     fs::write(doc.join("02.png"), b"page two").unwrap();
 
@@ -194,8 +200,8 @@ fn ae6_docx_is_transcribed_and_unknown_extension_is_logged_skip() {
     let docx_path = tmp.path().join("memo.docx");
     let file = fs::File::create(&docx_path).unwrap();
     let mut zip = zip::ZipWriter::new(file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     zip.start_file("word/document.xml", options).unwrap();
     zip.write_all(b"<w:document><w:p><w:r><w:t>Quarterly memo</w:t></w:r></w:p></w:document>")
         .unwrap();

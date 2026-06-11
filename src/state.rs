@@ -103,8 +103,8 @@ impl Ledger {
         if !path.exists() {
             return Ok(Ledger::default());
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -136,8 +136,8 @@ impl Failures {
         if !path.exists() {
             return Ok(Failures::default());
         }
-        let text = fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
         serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))
     }
 

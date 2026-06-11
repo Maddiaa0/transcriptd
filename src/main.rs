@@ -83,8 +83,9 @@ fn run() -> Result<ExitCode> {
     match cli.command.unwrap_or(Command::Scan { watch: false }) {
         Command::Init { global } => {
             let (path, template) = if global {
-                let path = config::xdg_config_path()
-                    .context("cannot determine config dir: neither XDG_CONFIG_HOME nor HOME is set")?;
+                let path = config::xdg_config_path().context(
+                    "cannot determine config dir: neither XDG_CONFIG_HOME nor HOME is set",
+                )?;
                 (path, EXAMPLE_GLOBAL_CONFIG)
             } else {
                 (state.config_path(), EXAMPLE_CONFIG)
@@ -108,7 +109,10 @@ fn run() -> Result<ExitCode> {
             let ledger = Ledger::load(&state)?;
             let failures = Failures::load(&state)?;
             println!("transcriptd status for {}", folder.display());
-            println!("  transcribed (unique content hashes): {}", ledger.entries.len());
+            println!(
+                "  transcribed (unique content hashes): {}",
+                ledger.entries.len()
+            );
             println!("  skipped (unsupported/oversize): {}", ledger.skipped.len());
             println!("  failures pending retry: {}", failures.entries.len());
             for (path, f) in &failures.entries {
