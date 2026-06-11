@@ -7,4 +7,6 @@
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+localdocs/*
+
 # Cargo.lock is committed: this is a binary crate, builds should be reproducible

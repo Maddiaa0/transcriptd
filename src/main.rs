@@ -3,7 +3,7 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use transcriptd::config::{Config, EXAMPLE_CONFIG};
+use transcriptd::config::{self, Config, EXAMPLE_CONFIG, EXAMPLE_GLOBAL_CONFIG};
 use transcriptd::openrouter::OpenRouterClient;
 use transcriptd::state::{write_atomic, Failures, Ledger, StateDir};
 use transcriptd::{scan, watch};
@@ -34,7 +34,12 @@ enum Command {
         watch: bool,
     },
     /// Write a commented config template into <folder>/.transcriptd/
-    Init,
+    Init {
+        /// Write the global template (~/.config/transcriptd/config.toml)
+        /// instead — the place for the API key and default model
+        #[arg(long)]
+        global: bool,
+    },
     /// Summarize transcription state and visible failures
     Status,
 }
@@ -60,22 +65,41 @@ fn run() -> Result<ExitCode> {
     }
     let state = StateDir::new(&folder)?;
 
-    let config_path = cli.config.clone().unwrap_or_else(|| state.config_path());
-    let cfg = if config_path.exists() {
-        Config::load(&config_path)?
-    } else if cli.config.is_some() {
-        bail!("config file not found: {}", config_path.display());
-    } else {
-        Config::default()
-    };
+    // Layered config: global XDG file, then the folder's own config, then an
+    // explicit --config path. Later layers override earlier ones key by key.
+    let mut layers: Vec<PathBuf> = Vec::new();
+    if let Some(xdg) = config::xdg_config_path() {
+        layers.push(xdg);
+    }
+    layers.push(state.config_path());
+    if let Some(custom) = &cli.config {
+        if !custom.exists() {
+            bail!("config file not found: {}", custom.display());
+        }
+        layers.push(custom.clone());
+    }
+    let cfg = Config::load_layered(&layers)?;
 
     match cli.command.unwrap_or(Command::Scan { watch: false }) {
-        Command::Init => {
-            let path = state.config_path();
+        Command::Init { global } => {
+            let (path, template) = if global {
+                let path = config::xdg_config_path()
+                    .context("cannot determine config dir: neither XDG_CONFIG_HOME nor HOME is set")?;
+                (path, EXAMPLE_GLOBAL_CONFIG)
+            } else {
+                (state.config_path(), EXAMPLE_CONFIG)
+            };
             if path.exists() {
                 println!("config already exists: {}", path.display());
             } else {
-                write_atomic(&path, EXAMPLE_CONFIG.as_bytes())?;
+                if let Some(dir) = path.parent() {
+                    std::fs::create_dir_all(dir)?;
+                }
+                write_atomic(&path, template.as_bytes())?;
+                if global {
+                    // The global config may hold the API key.
+                    restrict_permissions(&path);
+                }
                 println!("wrote {}", path.display());
             }
             Ok(ExitCode::SUCCESS)
@@ -98,10 +122,13 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Scan { watch: watch_mode } => {
-            let api_key = std::env::var(&cfg.api_key_env).with_context(|| {
+            let api_key = cfg.resolve_api_key().with_context(|| {
                 format!(
-                    "API key environment variable {} is not set",
-                    cfg.api_key_env
+                    "no API key: set the {} environment variable, or api_key in {}",
+                    cfg.api_key_env,
+                    config::xdg_config_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "the global config".to_string())
                 )
             })?;
             let client = OpenRouterClient::new(&cfg, api_key)?;
@@ -124,3 +151,12 @@ fn run() -> Result<ExitCode> {
 fn first_line(s: &str) -> &str {
     s.lines().next().unwrap_or("")
 }
+
+#[cfg(unix)]
+fn restrict_permissions(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &std::path::Path) {}

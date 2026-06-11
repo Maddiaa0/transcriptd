@@ -78,7 +78,8 @@ Anything else is logged as skipped, once, and the sweep continues.
 ## Commands
 
 ```sh
-transcriptd --folder /srv/notes init          # write a commented config template
+transcriptd init --global                     # global config: API key + default model
+transcriptd --folder /srv/notes init          # per-folder config template
 transcriptd --folder /srv/notes scan          # one sweep, exits non-zero if any file failed
 transcriptd --folder /srv/notes scan --watch  # keep running, rescan on fs events + timer
 transcriptd --folder /srv/notes status        # ledger + pending-failure summary
@@ -86,12 +87,25 @@ transcriptd --folder /srv/notes status        # ledger + pending-failure summary
 
 ## Configuration
 
-`transcriptd init` writes `.transcriptd/config.toml`. Everything has a
-default; the file is optional. Swapping the transcription model is a config
-change only:
+Config is layered; later layers override earlier ones key by key, and every
+file is optional (everything has a default):
+
+1. **Global:** `$XDG_CONFIG_HOME/transcriptd/config.toml`
+   (`~/.config/transcriptd/config.toml`) — `transcriptd init --global`.
+   Machine-wide settings: default model and the OpenRouter API key. Written
+   with mode 600. This directory is also where future machine-local
+   application data (e.g. an index database) will live.
+2. **Per-folder:** `<folder>/.transcriptd/config.toml` — `transcriptd init`.
+   Folder-specific overrides (marker, stability window, a different model).
+   Don't put the API key here: this file syncs with the corpus.
+3. **Explicit:** `--config <path>` overrides both.
+
+The API key itself resolves as: `$OPENROUTER_API_KEY` (or whatever
+`api_key_env` names) if set, else `api_key` from the merged config.
 
 ```toml
 model = "google/gemini-2.5-flash"   # any vision-capable OpenRouter model
+# api_key = "sk-or-..."             # global config only
 api_key_env = "OPENROUTER_API_KEY"
 marker = "<!-- transcriptd:document -->"
 rollup_name = "transcript.md"
