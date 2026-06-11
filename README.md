@@ -6,8 +6,6 @@ so anything dropped into the folder — handwritten note pages, PDFs, office
 documents — becomes plain text that `rg`, agents, and knowledge-base tools can
 consume.
 
-Requirements doc: `docs/brainstorms/2026-06-11-folder-transcription-daemon-requirements.md`.
-
 ## How it works
 
 The core is one idempotent command:
