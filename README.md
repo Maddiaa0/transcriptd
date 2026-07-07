@@ -106,12 +106,40 @@ backend = "openrouter"              # or "cli" — see below
 model = "google/gemini-2.5-flash"   # any vision-capable OpenRouter model
 # api_key = "sk-or-..."             # global config only
 api_key_env = "OPENROUTER_API_KEY"
+# output_dir = "transcripts"        # default: sidecars land next to sources
 marker = "<!-- transcriptd:document -->"
 rollup_name = "transcript.md"
 stability_seconds = 10
 pdf_engine = "native"               # native | pdf-text | mistral-ocr
 prompt_version = "1"                # bump when overriding `prompt`
 ```
+
+### Choosing the output folder
+
+By default every transcript lands next to its source file
+(`page.png` → `page.png.md`) and rollups at each marked folder's root.
+Setting `output_dir` redirects all generated markdown — sidecars and
+rollups — into a separate tree that mirrors the folder's structure, keeping
+the source folder clean:
+
+```toml
+# in .transcriptd/config.toml (or the global config)
+output_dir = "transcripts"        # <folder>/transcripts/...
+# output_dir = "/srv/transcripts" # absolute paths work too
+```
+
+```
+notes/                            notes/transcripts/
+  notebook/01.png          →        notebook/01.png.md
+  notebook/index.md                 notebook/transcript.md   (rollup)
+  loose.jpg                         loose.jpg.md
+```
+
+Relative paths resolve against the watched folder, so a per-folder config
+that syncs with the corpus behaves the same on every machine. An output tree
+inside the watched folder is never scanned as a source. Changing
+`output_dir` later is cheap: the next scan rebuilds every sidecar at the new
+location from cache, with no API calls (old files are not deleted).
 
 ## Backends
 

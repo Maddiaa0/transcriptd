@@ -129,13 +129,27 @@ fn run() -> Result<ExitCode> {
         Command::Scan { watch: watch_mode } => {
             let client: Box<dyn Transcriber> = match cfg.backend.as_str() {
                 "openrouter" => {
+                    // The most common misconfiguration is expecting backend =
+                    // "cli" but the file that sets it not being read (wrong
+                    // HOME under systemd, stale path); name the active
+                    // backend and every layer consulted so that's visible.
                     let api_key = cfg.resolve_api_key().with_context(|| {
+                        let consulted: String = layers
+                            .iter()
+                            .map(|p| {
+                                format!(
+                                    "\n  - {} ({})",
+                                    p.display(),
+                                    if p.exists() { "loaded" } else { "not found" }
+                                )
+                            })
+                            .collect();
                         format!(
-                            "no API key: set the {} environment variable, or api_key in {}",
-                            cfg.api_key_env,
-                            config::xdg_config_path()
-                                .map(|p| p.display().to_string())
-                                .unwrap_or_else(|| "the global config".to_string())
+                            "no API key: the active backend is \"openrouter\", which needs one. \
+                             Set the {} environment variable or api_key in the global config; \
+                             to transcribe via a local agent CLI without an API key, set \
+                             backend = \"cli\". Config files consulted:{consulted}",
+                            cfg.api_key_env
                         )
                     })?;
                     Box::new(OpenRouterClient::new(&cfg, api_key)?)

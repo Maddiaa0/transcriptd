@@ -152,6 +152,52 @@ fn ae4_failure_writes_no_sidecar_and_is_retried_next_sweep() {
 }
 
 #[test]
+fn output_dir_redirects_sidecars_and_rollups_into_mirrored_tree() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        output_dir: Some("transcripts".to_string()),
+        ..test_config()
+    };
+    let state = setup(tmp.path());
+    let doc = tmp.path().join("notebook");
+    fs::create_dir(&doc).unwrap();
+    fs::write(
+        doc.join("index.md"),
+        format!("# Notebook\n\n{}\n", cfg.marker),
+    )
+    .unwrap();
+    fs::write(doc.join("01.png"), b"page one").unwrap();
+    fs::write(tmp.path().join("loose.png"), b"loose page").unwrap();
+
+    let mock = Mock::new();
+    let outcome = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(outcome.transcribed, 2);
+    assert_eq!(outcome.rollups_written, 1);
+
+    // Generated markdown lands in the mirrored tree, not next to sources.
+    let out = tmp.path().join("transcripts");
+    assert!(out.join("loose.png.md").exists());
+    assert!(out.join("notebook/01.png.md").exists());
+    assert!(out.join("notebook").join(&cfg.rollup_name).exists());
+    assert!(!sidecar_path(&tmp.path().join("loose.png")).exists());
+    assert!(!doc.join(&cfg.rollup_name).exists());
+
+    // The output tree is never treated as a source, and the rescan is
+    // idempotent: zero API calls, nothing rewritten.
+    let second = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(second.api_calls, 0);
+    assert_eq!(second.up_to_date, 2);
+    assert_eq!(second.rollups_written, 0);
+
+    // A deleted output file is rebuilt from cache without an API call.
+    fs::remove_file(out.join("loose.png.md")).unwrap();
+    let third = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(third.api_calls, 0);
+    assert_eq!(third.reused, 1);
+    assert!(out.join("loose.png.md").exists());
+}
+
+#[test]
 fn ae5_marked_folder_gets_rollup_and_incremental_page_restitches_from_cache() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = test_config();
