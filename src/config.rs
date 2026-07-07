@@ -351,4 +351,203 @@ image_command = ["codex", "exec", "-i", "{file}", "{prompt}"]
         let err = Config::load_layered(std::slice::from_ref(&bad)).unwrap_err();
         assert!(format!("{err:#}").contains("bad.toml"));
     }
+
+    #[test]
+    fn shipped_init_templates_parse_and_match_defaults() {
+        // `transcriptd init` writes these verbatim; a template that no longer
+        // deserializes would brick every fresh install.
+        let folder: Config = toml::from_str(EXAMPLE_CONFIG).unwrap();
+        let global: Config = toml::from_str(EXAMPLE_GLOBAL_CONFIG).unwrap();
+
+        // Their uncommented values are documentation of the defaults — keep
+        // them in lockstep with Config::default().
+        let defaults = Config::default();
+        assert_eq!(folder.model, defaults.model);
+        assert_eq!(folder.api_key_env, defaults.api_key_env);
+        assert_eq!(folder.marker, defaults.marker);
+        assert_eq!(folder.rollup_name, defaults.rollup_name);
+        assert_eq!(folder.stability_seconds, defaults.stability_seconds);
+        assert_eq!(
+            folder.watch_debounce_seconds,
+            defaults.watch_debounce_seconds
+        );
+        assert_eq!(folder.watch_rescan_seconds, defaults.watch_rescan_seconds);
+        assert_eq!(folder.pdf_engine, defaults.pdf_engine);
+        assert_eq!(folder.prompt_version, defaults.prompt_version);
+        assert_eq!(
+            folder.request_timeout_seconds,
+            defaults.request_timeout_seconds
+        );
+        assert_eq!(folder.api_base, defaults.api_base);
+        assert_eq!(folder.max_file_mb, defaults.max_file_mb);
+        assert_eq!(global.model, defaults.model);
+        assert_eq!(global.api_key_env, defaults.api_key_env);
+    }
+
+    #[test]
+    fn defaults_are_stable() {
+        // Every default is observable behavior (recorded in sidecars, used as
+        // API parameters); changing one should be a deliberate test edit.
+        let cfg = Config::default();
+        assert_eq!(cfg.backend, "openrouter");
+        assert_eq!(cfg.model, DEFAULT_MODEL);
+        assert!(cfg.api_key.is_none());
+        assert_eq!(cfg.api_key_env, "OPENROUTER_API_KEY");
+        assert!(cfg.output_dir.is_none());
+        assert_eq!(cfg.marker, DEFAULT_MARKER);
+        assert_eq!(cfg.rollup_name, DEFAULT_ROLLUP_NAME);
+        assert_eq!(cfg.stability_seconds, 10);
+        assert_eq!(cfg.watch_debounce_seconds, 2);
+        assert_eq!(cfg.watch_rescan_seconds, 300);
+        assert_eq!(cfg.pdf_engine, "native");
+        assert!(cfg.prompt.is_none());
+        assert_eq!(cfg.prompt(), DEFAULT_PROMPT);
+        assert_eq!(cfg.prompt_version, "1");
+        assert_eq!(cfg.request_timeout_seconds, 300);
+        assert_eq!(cfg.api_base, "https://openrouter.ai/api/v1");
+        assert_eq!(cfg.max_file_mb, 32);
+        assert!(cfg.cli.command.is_empty());
+        assert!(cfg.cli.image_command.is_none());
+        assert!(cfg.cli.pdf_command.is_none());
+        assert!(cfg.cli.text_command.is_none());
+    }
+
+    #[test]
+    fn every_field_deserializes_from_a_fully_populated_config() {
+        let cfg: Config = toml::from_str(
+            r#"
+backend = "cli"
+model = "m"
+api_key = "k"
+api_key_env = "E"
+output_dir = "out"
+marker = "MARK"
+rollup_name = "roll.md"
+stability_seconds = 1
+watch_debounce_seconds = 2
+watch_rescan_seconds = 3
+pdf_engine = "pdf-text"
+prompt = "P"
+prompt_version = "9"
+request_timeout_seconds = 4
+api_base = "https://example.test/v1"
+max_file_mb = 5
+
+[cli]
+command = ["a", "{file}"]
+image_command = ["b", "{file}"]
+pdf_command = ["c", "{file}"]
+text_command = ["d", "{file}"]
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.backend, "cli");
+        assert_eq!(cfg.model, "m");
+        assert_eq!(cfg.api_key.as_deref(), Some("k"));
+        assert_eq!(cfg.api_key_env, "E");
+        assert_eq!(cfg.output_dir.as_deref(), Some("out"));
+        assert_eq!(cfg.marker, "MARK");
+        assert_eq!(cfg.rollup_name, "roll.md");
+        assert_eq!(cfg.stability_seconds, 1);
+        assert_eq!(cfg.watch_debounce_seconds, 2);
+        assert_eq!(cfg.watch_rescan_seconds, 3);
+        assert_eq!(cfg.pdf_engine, "pdf-text");
+        assert_eq!(cfg.prompt(), "P");
+        assert_eq!(cfg.prompt_version, "9");
+        assert_eq!(cfg.request_timeout_seconds, 4);
+        assert_eq!(cfg.api_base, "https://example.test/v1");
+        assert_eq!(cfg.max_file_mb, 5);
+        assert_eq!(cfg.cli.command, vec!["a", "{file}"]);
+        assert_eq!(cfg.cli.image_command.unwrap(), vec!["b", "{file}"]);
+        assert_eq!(cfg.cli.pdf_command.unwrap(), vec!["c", "{file}"]);
+        assert_eq!(cfg.cli.text_command.unwrap(), vec!["d", "{file}"]);
+    }
+
+    #[test]
+    fn unknown_keys_are_rejected_everywhere() {
+        // deny_unknown_fields is the typo guard; it must hold in the nested
+        // [cli] table too, or a misspelled override silently falls back.
+        assert!(toml::from_str::<Config>("nope = 1\n").is_err());
+        assert!(toml::from_str::<Config>("[cli]\nimage_cmd = [\"x\"]\n").is_err());
+    }
+
+    #[test]
+    fn wrong_value_type_error_names_the_offending_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad-type.toml");
+        std::fs::write(&bad, "stability_seconds = \"ten\"\n").unwrap();
+        let err = Config::load_layered(std::slice::from_ref(&bad)).unwrap_err();
+        assert!(format!("{err:#}").contains("bad-type.toml"));
+    }
+
+    #[test]
+    fn explicit_layer_beats_folder_beats_global() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        let folder = dir.path().join("folder.toml");
+        let explicit = dir.path().join("explicit.toml");
+        std::fs::write(&global, "model = \"g\"\nmarker = \"G\"\nmax_file_mb = 1\n").unwrap();
+        std::fs::write(&folder, "model = \"f\"\nmarker = \"F\"\n").unwrap();
+        std::fs::write(&explicit, "model = \"e\"\n").unwrap();
+
+        let cfg = Config::load_layered(&[global, folder, explicit]).unwrap();
+        assert_eq!(cfg.model, "e");
+        assert_eq!(cfg.marker, "F");
+        assert_eq!(cfg.max_file_mb, 1);
+    }
+
+    #[test]
+    fn cli_table_is_replaced_wholesale_by_later_layers() {
+        // Documented behavior: layering merges top-level keys, so a folder's
+        // [cli] table overrides the global one entirely, not key by key.
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        let folder = dir.path().join("folder.toml");
+        std::fs::write(
+            &global,
+            "[cli]\ncommand = [\"g\", \"{file}\"]\nimage_command = [\"gi\", \"{file}\"]\n",
+        )
+        .unwrap();
+        std::fs::write(&folder, "[cli]\ncommand = [\"f\", \"{file}\"]\n").unwrap();
+
+        let cfg = Config::load_layered(&[global, folder]).unwrap();
+        assert_eq!(cfg.cli.command[0], "f");
+        assert!(
+            cfg.cli.image_command.is_none(),
+            "the folder [cli] table must replace the global one wholesale"
+        );
+    }
+
+    #[test]
+    fn api_key_resolution_prefers_nonempty_env_var() {
+        // Unique per-test env var names: tests run in parallel threads and
+        // the environment is process-global.
+        let var = "TRANSCRIPTD_TEST_KEY_RESOLUTION";
+        std::env::remove_var(var);
+        let cfg = Config {
+            api_key: Some("from-config".to_string()),
+            api_key_env: var.to_string(),
+            ..Config::default()
+        };
+        assert_eq!(cfg.resolve_api_key().as_deref(), Some("from-config"));
+
+        std::env::set_var(var, "from-env");
+        assert_eq!(cfg.resolve_api_key().as_deref(), Some("from-env"));
+
+        // A blank env var (e.g. `EnvironmentFile` with an empty value) must
+        // not shadow a configured key.
+        std::env::set_var(var, "   ");
+        assert_eq!(cfg.resolve_api_key().as_deref(), Some("from-config"));
+        std::env::remove_var(var);
+    }
+
+    #[test]
+    fn api_key_resolution_is_none_when_nothing_is_set() {
+        let cfg = Config {
+            api_key_env: "TRANSCRIPTD_TEST_KEY_UNSET".to_string(),
+            ..Config::default()
+        };
+        std::env::remove_var(&cfg.api_key_env);
+        assert!(cfg.resolve_api_key().is_none());
+    }
 }
