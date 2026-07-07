@@ -107,6 +107,7 @@ model = "google/gemini-2.5-flash"   # any vision-capable OpenRouter model
 # api_key = "sk-or-..."             # global config only
 api_key_env = "OPENROUTER_API_KEY"
 # output_dir = "transcripts"        # default: sidecars land next to sources
+# rollup_dir = "rollups"            # roll up every folder into this tree
 marker = "<!-- transcriptd:document -->"
 rollup_name = "transcript.md"
 stability_seconds = 10
@@ -140,6 +141,30 @@ that syncs with the corpus behaves the same on every machine. An output tree
 inside the watched folder is never scanned as a source. Changing
 `output_dir` later is cheap: the next scan rebuilds every sidecar at the new
 location from cache, with no API calls (old files are not deleted).
+
+### Per-folder rollups (`rollup_dir`)
+
+Setting `rollup_dir` turns every folder into a document: each folder
+containing transcribable files gets a rollup stitched from its **direct**
+files — no `index.md` marker needed — written at the folder's mirrored path
+under `rollup_dir`, and only there (nothing is written inside the source
+tree). Subfolders roll up separately at their own mirrored paths.
+
+```toml
+rollup_dir = "rollups"            # relative to the watched folder, or absolute
+```
+
+```
+notes/                            notes/rollups/
+  topic1/a.jpg, b.jpg      →        topic1/transcript.md   (a + b stitched)
+  topic2/drafts/c.jpg               topic2/drafts/transcript.md
+  loose.jpg                         transcript.md          (root files)
+```
+
+`rollup_dir` replaces the marker mechanism entirely while set, and composes
+with `output_dir` (per-file sidecars) — use either or both. Like marker
+rollups, restitching is pure reassembly from cache and never costs an API
+call; the rollup tree is never scanned as a source.
 
 ## Backends
 

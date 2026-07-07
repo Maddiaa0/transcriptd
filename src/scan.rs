@@ -94,11 +94,13 @@ pub fn scan(
     let now = SystemTime::now();
     let max_bytes = cfg.max_file_mb * 1024 * 1024;
     let out_root = cfg.output_root(folder);
-    // An output tree inside the watched folder holds only generated markdown;
-    // never treat anything dropped there as a source.
-    let excluded_root = out_root
-        .clone()
-        .filter(|r| r != folder && r.starts_with(folder));
+    // Output/rollup trees inside the watched folder hold only generated
+    // markdown; never treat anything dropped there as a source.
+    let excluded_roots: Vec<PathBuf> = [out_root.clone(), cfg.rollup_root(folder)]
+        .into_iter()
+        .flatten()
+        .filter(|r| r != folder && r.starts_with(folder))
+        .collect();
 
     let files: Vec<PathBuf> = WalkDir::new(folder)
         .sort_by_file_name()
@@ -107,7 +109,7 @@ pub fn scan(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .map(|e| e.into_path())
-        .filter(|p| excluded_root.as_ref().is_none_or(|r| !p.starts_with(r)))
+        .filter(|p| !excluded_roots.iter().any(|r| p.starts_with(r)))
         .collect();
 
     for path in files {
@@ -369,12 +371,17 @@ fn sidecar_content(
 /// A folder whose index.md contains the configured marker is a document:
 /// maintain a stitched rollup at its root, one section per transcribed file
 /// in filename order. Pure reassembly from cache — zero API calls (R9).
+/// With rollup_dir set, marker semantics are replaced: every folder rolls up
+/// into the rollup tree instead.
 fn stitch_rollups(
     folder: &Path,
     cfg: &Config,
     state: &StateDir,
     hashes: &BTreeMap<PathBuf, String>,
 ) -> Result<usize> {
+    if let Some(rollup_root) = cfg.rollup_root(folder) {
+        return stitch_every_folder(folder, cfg, state, hashes, &rollup_root);
+    }
     let marked = find_marked_folders(folder, &cfg.marker);
     if marked.is_empty() {
         return Ok(0);
@@ -427,6 +434,70 @@ fn stitch_rollups(
                 .join(marked_folder.strip_prefix(folder).unwrap_or(marked_folder))
                 .join(&cfg.rollup_name),
         };
+        let existing = fs::read_to_string(&rollup_path).unwrap_or_default();
+        if existing != content {
+            write_output(&rollup_path, content.as_bytes())?;
+            state.log(
+                "INFO",
+                &format!("restitched rollup: {folder_rel}/{}", cfg.rollup_name),
+            );
+            written += 1;
+        }
+    }
+    Ok(written)
+}
+
+/// rollup_dir mode: every folder containing transcribable files gets a
+/// rollup of its DIRECT files (subfolders roll up separately), written at
+/// the folder's mirrored path under the rollup tree — and only there. Like
+/// marker rollups, this is pure reassembly from cache (R9).
+fn stitch_every_folder(
+    folder: &Path,
+    cfg: &Config,
+    state: &StateDir,
+    hashes: &BTreeMap<PathBuf, String>,
+    rollup_root: &Path,
+) -> Result<usize> {
+    // Group by direct parent; BTreeMap iteration keeps filename order.
+    let mut groups: BTreeMap<PathBuf, Vec<(&PathBuf, &String)>> = BTreeMap::new();
+    for (path, sha) in hashes {
+        if let Some(parent) = path.parent() {
+            groups
+                .entry(parent.to_path_buf())
+                .or_default()
+                .push((path, sha));
+        }
+    }
+
+    let mut written = 0;
+    for (dir, members) in &groups {
+        let mut sections = Vec::new();
+        for (path, sha) in members {
+            let Some(md) = cached_markdown(state, sha) else {
+                continue; // not yet transcribed (failed or deferred)
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            sections.push(format!("## {name}\n\n{}", md.trim()));
+        }
+        if sections.is_empty() {
+            continue;
+        }
+        let rel = dir.strip_prefix(folder).unwrap_or(dir);
+        let folder_rel = if rel.as_os_str().is_empty() {
+            ".".to_string()
+        } else {
+            rel.to_string_lossy().to_string()
+        };
+        let content = format!(
+            "---\ngenerator: transcriptd {}\nkind: rollup\nfolder: {folder_rel}\nsections: {}\n---\n\n{}\n",
+            crate::VERSION,
+            sections.len(),
+            sections.join("\n\n")
+        );
+        let rollup_path = rollup_root.join(rel).join(&cfg.rollup_name);
         let existing = fs::read_to_string(&rollup_path).unwrap_or_default();
         if existing != content {
             write_output(&rollup_path, content.as_bytes())?;

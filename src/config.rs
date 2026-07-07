@@ -33,6 +33,13 @@ pub struct Config {
     /// source file and rollups at each marked folder's root. Relative paths
     /// resolve against the watched folder.
     pub output_dir: Option<String>,
+    /// When set, EVERY folder containing transcribable files gets a rollup —
+    /// no index.md marker needed — stitched from its direct files and written
+    /// at the folder's mirrored path under this directory (and only there;
+    /// nothing is written at the folder's own root). Replaces the
+    /// marker-based rollup mechanism. Relative paths resolve against the
+    /// watched folder.
+    pub rollup_dir: Option<String>,
     /// A folder whose index.md contains this string is a document (gets a rollup).
     pub marker: String,
     /// Filename of the stitched rollup written at a marked folder's root.
@@ -89,6 +96,7 @@ impl Default for Config {
             api_key: None,
             api_key_env: "OPENROUTER_API_KEY".to_string(),
             output_dir: None,
+            rollup_dir: None,
             marker: DEFAULT_MARKER.to_string(),
             rollup_name: DEFAULT_ROLLUP_NAME.to_string(),
             stability_seconds: 10,
@@ -138,16 +146,13 @@ impl Config {
     /// the default in-place layout. Relative paths resolve against the
     /// watched folder so a synced per-folder config works on every machine.
     pub fn output_root(&self, folder: &Path) -> Option<PathBuf> {
-        let dir = self.output_dir.as_deref()?.trim();
-        if dir.is_empty() {
-            return None;
-        }
-        let path = Path::new(dir);
-        Some(if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            folder.join(path)
-        })
+        resolve_against(folder, self.output_dir.as_deref())
+    }
+
+    /// Root of the per-folder rollup tree when `rollup_dir` enables it; None
+    /// means the marker-based mechanism is active instead.
+    pub fn rollup_root(&self, folder: &Path) -> Option<PathBuf> {
+        resolve_against(folder, self.rollup_dir.as_deref())
     }
 
     /// Env var first (systemd EnvironmentFile, shell exports), then the
@@ -158,6 +163,21 @@ impl Config {
             .filter(|k| !k.trim().is_empty())
             .or_else(|| self.api_key.clone())
     }
+}
+
+/// Resolve a configured directory: absolute paths as-is, relative ones
+/// against the watched folder, blank/unset as None.
+fn resolve_against(folder: &Path, dir: Option<&str>) -> Option<PathBuf> {
+    let dir = dir?.trim();
+    if dir.is_empty() {
+        return None;
+    }
+    let path = Path::new(dir);
+    Some(if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        folder.join(path)
+    })
 }
 
 /// Per-user application directory under XDG_CONFIG_HOME
@@ -231,6 +251,12 @@ api_key_env = "OPENROUTER_API_KEY"
 # folder's structure. Default: next to each source file. Relative paths
 # resolve against the watched folder.
 # output_dir = "transcripts"
+
+# When set, EVERY folder gets a rollup of its direct files (no index.md
+# marker needed), written at the folder's mirrored path under this directory
+# and nowhere else. Replaces the marker mechanism below. Relative paths
+# resolve against the watched folder.
+# rollup_dir = "rollups"
 
 # A folder whose index.md contains this string is a document:
 # transcriptd maintains a stitched rollup at its root.
@@ -315,6 +341,14 @@ mod tests {
 
         cfg.output_dir = Some("  ".to_string());
         assert!(cfg.output_root(folder).is_none());
+
+        // rollup_root shares the same resolution rules.
+        assert!(cfg.rollup_root(folder).is_none());
+        cfg.rollup_dir = Some("rollups".to_string());
+        assert_eq!(
+            cfg.rollup_root(folder).unwrap(),
+            PathBuf::from("/srv/notes/rollups")
+        );
     }
 
     #[test]
@@ -395,6 +429,7 @@ image_command = ["codex", "exec", "-i", "{file}", "{prompt}"]
         assert!(cfg.api_key.is_none());
         assert_eq!(cfg.api_key_env, "OPENROUTER_API_KEY");
         assert!(cfg.output_dir.is_none());
+        assert!(cfg.rollup_dir.is_none());
         assert_eq!(cfg.marker, DEFAULT_MARKER);
         assert_eq!(cfg.rollup_name, DEFAULT_ROLLUP_NAME);
         assert_eq!(cfg.stability_seconds, 10);
@@ -422,6 +457,7 @@ model = "m"
 api_key = "k"
 api_key_env = "E"
 output_dir = "out"
+rollup_dir = "roll"
 marker = "MARK"
 rollup_name = "roll.md"
 stability_seconds = 1
@@ -447,6 +483,7 @@ text_command = ["d", "{file}"]
         assert_eq!(cfg.api_key.as_deref(), Some("k"));
         assert_eq!(cfg.api_key_env, "E");
         assert_eq!(cfg.output_dir.as_deref(), Some("out"));
+        assert_eq!(cfg.rollup_dir.as_deref(), Some("roll"));
         assert_eq!(cfg.marker, "MARK");
         assert_eq!(cfg.rollup_name, "roll.md");
         assert_eq!(cfg.stability_seconds, 1);

@@ -198,6 +198,79 @@ fn output_dir_redirects_sidecars_and_rollups_into_mirrored_tree() {
 }
 
 #[test]
+fn rollup_dir_rolls_up_every_folder_from_direct_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        rollup_dir: Some("rollups".to_string()),
+        ..test_config()
+    };
+    let state = setup(tmp.path());
+    // No index.md markers anywhere: every folder still rolls up.
+    fs::create_dir_all(tmp.path().join("topic1")).unwrap();
+    fs::create_dir_all(tmp.path().join("topic2/drafts")).unwrap();
+    fs::write(tmp.path().join("topic1/a.png"), b"page a").unwrap();
+    fs::write(tmp.path().join("topic1/b.png"), b"page b").unwrap();
+    fs::write(tmp.path().join("topic2/drafts/c.png"), b"page c").unwrap();
+    fs::write(tmp.path().join("loose.png"), b"loose page").unwrap();
+
+    let mock = Mock::new();
+    let outcome = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(outcome.transcribed, 4);
+    // topic1, topic2/drafts, and the root each roll up; topic2 has no
+    // direct files so it gets no rollup of its own.
+    assert_eq!(outcome.rollups_written, 3);
+
+    let out = tmp.path().join("rollups");
+    let topic1 = fs::read_to_string(out.join("topic1").join(&cfg.rollup_name)).unwrap();
+    assert!(topic1.contains("## a.png") && topic1.contains("## b.png"));
+    let drafts = fs::read_to_string(out.join("topic2/drafts").join(&cfg.rollup_name)).unwrap();
+    assert!(drafts.contains("## c.png"));
+    assert!(!drafts.contains("## a.png"), "direct files only");
+    let root = fs::read_to_string(out.join(&cfg.rollup_name)).unwrap();
+    assert!(root.contains("## loose.png"));
+    assert!(!out.join("topic2").join(&cfg.rollup_name).exists());
+
+    // Rollups exist ONLY in the rollup tree, never at folder roots.
+    assert!(!tmp.path().join("topic1").join(&cfg.rollup_name).exists());
+    // Sidecars still land next to sources (rollup_dir doesn't move them).
+    assert!(sidecar_path(&tmp.path().join("topic1/a.png")).exists());
+
+    // Idempotent rescan: rollup tree not scanned, nothing rewritten.
+    let second = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(second.api_calls, 0);
+    assert_eq!(second.rollups_written, 0);
+    assert_eq!(second.up_to_date, 4);
+}
+
+#[test]
+fn rollup_dir_replaces_marker_rollups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        rollup_dir: Some("rollups".to_string()),
+        ..test_config()
+    };
+    let state = setup(tmp.path());
+    let doc = tmp.path().join("notebook");
+    fs::create_dir(&doc).unwrap();
+    fs::write(
+        doc.join("index.md"),
+        format!("# Notebook\n\n{}\n", cfg.marker),
+    )
+    .unwrap();
+    fs::write(doc.join("01.png"), b"page one").unwrap();
+
+    let mock = Mock::new();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    // The marker is inert while rollup_dir is set: no in-place rollup.
+    assert!(!doc.join(&cfg.rollup_name).exists());
+    assert!(tmp
+        .path()
+        .join("rollups/notebook")
+        .join(&cfg.rollup_name)
+        .exists());
+}
+
+#[test]
 fn ae5_marked_folder_gets_rollup_and_incremental_page_restitches_from_cache() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = test_config();
