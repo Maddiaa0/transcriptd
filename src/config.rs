@@ -222,14 +222,38 @@ api_key_env = "OPENROUTER_API_KEY"
 #              {output} from the template to read the transcript from stdout
 #
 # Example: OpenAI Codex CLI (rides your ChatGPT subscription — run
-# `codex login` once first). Codex attaches images with -i; other kinds get
-# the file path appended to the prompt so the agent reads it itself.
+# `codex login` once first), or write it for you with working defaults:
+# `transcriptd init --global --backend cli`. Codex attaches images with -i;
+# other kinds get the file path appended to the prompt so the agent reads it
+# itself. The "--" is required: codex's -i flag is variadic and would
+# otherwise swallow the prompt as another image path.
 # [cli]
-# command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
-# image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "{prompt}"]
+# command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "--", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
+# image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "--", "{prompt}"]
 #
 # Any other agent CLI (hermes, claude, ...) works the same way — one argv
 # template that receives the file and prompt and emits markdown.
+"#;
+
+/// Written by `transcriptd init --global --backend cli`: working,
+/// uncommented defaults for transcribing via the OpenAI Codex CLI.
+pub const EXAMPLE_GLOBAL_CONFIG_CLI: &str = r#"# transcriptd global configuration (~/.config/transcriptd/config.toml)
+# Backend: local agent CLI (OpenAI Codex) — transcription rides your ChatGPT
+# subscription; no API key needed. Run `codex login` once before scanning.
+# A folder's own .transcriptd/config.toml overrides these key by key.
+
+backend = "cli"
+
+# Provenance label recorded in sidecar frontmatter (not an API model id).
+model = "codex"
+
+[cli]
+# argv templates; placeholders: {file} (the document), {prompt}, {output}
+# (file the command writes the transcript to). The "--" is required: codex's
+# -i flag is variadic and would otherwise swallow the prompt as another
+# image path.
+command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "--", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
+image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "--", "{prompt}"]
 "#;
 
 pub const EXAMPLE_CONFIG: &str = r#"# transcriptd per-folder configuration
@@ -587,5 +611,26 @@ text_command = ["d", "{file}"]
         };
         std::env::remove_var(&cfg.api_key_env);
         assert!(cfg.resolve_api_key().is_none());
+    }
+
+    #[test]
+    fn cli_init_template_is_a_working_cli_config() {
+        // `init --global --backend cli` promises WORKING defaults: the
+        // template must parse, select the cli backend, and pass backend
+        // construction validation.
+        let cfg: Config = toml::from_str(EXAMPLE_GLOBAL_CONFIG_CLI).unwrap();
+        assert_eq!(cfg.backend, "cli");
+        crate::cli::CliTranscriber::new(&cfg).unwrap();
+
+        // Codex's -i/--image flag is variadic: without "--" between it and
+        // the prompt, the prompt is consumed as another image path and codex
+        // fails with "No prompt provided via stdin".
+        let image = cfg.cli.image_command.as_ref().unwrap();
+        let i_pos = image.iter().position(|a| a == "-i").unwrap();
+        assert!(
+            image[i_pos..].contains(&"--".to_string()),
+            "image_command must separate -i from the prompt with --"
+        );
+        assert!(cfg.cli.command.contains(&"--".to_string()));
     }
 }

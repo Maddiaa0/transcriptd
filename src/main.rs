@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use transcriptd::cli::CliTranscriber;
-use transcriptd::config::{self, Config, EXAMPLE_CONFIG, EXAMPLE_GLOBAL_CONFIG};
+use transcriptd::config::{
+    self, Config, EXAMPLE_CONFIG, EXAMPLE_GLOBAL_CONFIG, EXAMPLE_GLOBAL_CONFIG_CLI,
+};
 use transcriptd::openrouter::{OpenRouterClient, Transcriber};
 use transcriptd::state::{write_atomic, Failures, Ledger, StateDir};
 use transcriptd::{scan, watch};
@@ -40,6 +42,11 @@ enum Command {
         /// instead — the place for the API key and default model
         #[arg(long)]
         global: bool,
+        /// With --global: write working defaults for this backend instead of
+        /// the commented template. "cli" (or "codex") sets up the OpenAI
+        /// Codex CLI; "openrouter" is the default template.
+        #[arg(long)]
+        backend: Option<String>,
     },
     /// Summarize transcription state and visible failures
     Status,
@@ -82,13 +89,24 @@ fn run() -> Result<ExitCode> {
     let cfg = Config::load_layered(&layers)?;
 
     match cli.command.unwrap_or(Command::Scan { watch: false }) {
-        Command::Init { global } => {
+        Command::Init { global, backend } => {
             let (path, template) = if global {
                 let path = config::xdg_config_path().context(
                     "cannot determine config dir: neither XDG_CONFIG_HOME nor HOME is set",
                 )?;
-                (path, EXAMPLE_GLOBAL_CONFIG)
+                let template = match backend.as_deref() {
+                    None | Some("openrouter") => EXAMPLE_GLOBAL_CONFIG,
+                    // "codex" accepted as the natural thing to type.
+                    Some("cli") | Some("codex") => EXAMPLE_GLOBAL_CONFIG_CLI,
+                    Some(other) => {
+                        bail!("unknown --backend \"{other}\": expected \"openrouter\" or \"cli\"")
+                    }
+                };
+                (path, template)
             } else {
+                if backend.is_some() {
+                    bail!("--backend picks machine-wide defaults: use it with --global");
+                }
                 (state.config_path(), EXAMPLE_CONFIG)
             };
             if path.exists() {
