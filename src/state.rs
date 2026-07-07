@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 pub const STATE_DIR_NAME: &str = ".transcriptd";
 
@@ -45,7 +46,13 @@ impl StateDir {
         self.root.join("raw").join(format!("{sha}.json"))
     }
 
+    /// Log to stderr and the in-folder log file, subject to the process log
+    /// level (see set_log_level). Level is a string ("INFO") at call sites
+    /// to keep them terse; unknown strings are treated as INFO.
     pub fn log(&self, level: &str, msg: &str) {
+        if Level::parse(level).unwrap_or(Level::Info) > log_level() {
+            return;
+        }
         let line = format!("{} {:<5} {}", now_rfc3339(), level, msg);
         eprintln!("{line}");
         if let Ok(mut f) = fs::OpenOptions::new()
@@ -56,6 +63,62 @@ impl StateDir {
             let _ = writeln!(f, "{line}");
         }
     }
+}
+
+/// Verbosity threshold: messages above the configured level are dropped.
+/// Error < Warn < Info (default) < Debug (-v) < Trace (-vv).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Level {
+    Error = 0,
+    Warn = 1,
+    Info = 2,
+    Debug = 3,
+    Trace = 4,
+}
+
+impl Level {
+    pub fn parse(s: &str) -> Option<Level> {
+        match s.to_ascii_lowercase().as_str() {
+            "error" => Some(Level::Error),
+            "warn" | "warning" => Some(Level::Warn),
+            "info" => Some(Level::Info),
+            "debug" => Some(Level::Debug),
+            "trace" => Some(Level::Trace),
+            _ => None,
+        }
+    }
+}
+
+/// Process-wide so components without a StateDir (the transcribers) can
+/// consult it too. Set once at startup.
+static LOG_LEVEL: AtomicU8 = AtomicU8::new(Level::Info as u8);
+
+pub fn set_log_level(level: Level) {
+    LOG_LEVEL.store(level as u8, Ordering::Relaxed);
+}
+
+pub fn log_level() -> Level {
+    match LOG_LEVEL.load(Ordering::Relaxed) {
+        0 => Level::Error,
+        1 => Level::Warn,
+        3 => Level::Debug,
+        4 => Level::Trace,
+        _ => Level::Info,
+    }
+}
+
+/// Stderr-only logging for components without a StateDir (the transcribers
+/// run below the layer that owns the log file).
+pub fn console_log(level: Level, msg: &str) {
+    if level > log_level() {
+        return;
+    }
+    eprintln!(
+        "{} {:<5} {}",
+        now_rfc3339(),
+        format!("{level:?}").to_uppercase(),
+        msg
+    );
 }
 
 pub fn now_rfc3339() -> String {
@@ -164,5 +227,21 @@ impl Failures {
 
     pub fn clear(&mut self, rel_path: &str) {
         self.entries.remove(rel_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn levels_parse_and_order() {
+        assert_eq!(Level::parse("info"), Some(Level::Info));
+        assert_eq!(Level::parse("DEBUG"), Some(Level::Debug));
+        assert_eq!(Level::parse("Warning"), Some(Level::Warn));
+        assert_eq!(Level::parse("nope"), None);
+        assert!(Level::Error < Level::Warn);
+        assert!(Level::Info < Level::Debug);
+        assert!(Level::Debug < Level::Trace);
     }
 }

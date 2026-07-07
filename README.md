@@ -84,6 +84,22 @@ transcriptd --folder /srv/notes scan --watch  # keep running, rescan on fs event
 transcriptd --folder /srv/notes status        # ledger + pending-failure summary
 ```
 
+## Logging
+
+Default output is INFO: transcriptions (with duration), cache rebuilds,
+skips, and errors — mirrored to stderr and `.transcriptd/transcriptd.log`.
+Turn up the detail with repeatable `-v` flags or the `LOG_LEVEL` environment
+variable (`error`, `warn`, `info`, `debug`, `trace`); `-v` wins when both
+are given:
+
+```sh
+transcriptd scan -v      # DEBUG: per-file decisions (up to date, what's
+                         # being transcribed, size, backend)
+transcriptd scan -vv     # TRACE: adds exact backend command invocations,
+                         # timings, and payload sizes
+LOG_LEVEL=debug transcriptd scan --watch   # same, systemd-friendly
+```
+
 ## Configuration
 
 Config is layered; later layers override earlier ones key by key, and every

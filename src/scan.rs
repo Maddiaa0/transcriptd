@@ -111,6 +111,21 @@ pub fn scan(
         .map(|e| e.into_path())
         .filter(|p| !excluded_roots.iter().any(|r| p.starts_with(r)))
         .collect();
+    state.log(
+        "DEBUG",
+        &format!("sweep start: {} files to consider", files.len()),
+    );
+    // For per-file work logs: what actually does the transcription.
+    let backend_desc = if cfg.backend == "cli" {
+        cfg.cli
+            .command
+            .first()
+            .or_else(|| cfg.cli.image_command.as_ref().and_then(|c| c.first()))
+            .cloned()
+            .unwrap_or_else(|| "cli".to_string())
+    } else {
+        cfg.model.clone()
+    };
 
     for path in files {
         let rel = path
@@ -179,6 +194,7 @@ pub fn scan(
             // Hash already recorded: never re-sent to the API (R2).
             let sc = resolve_sidecar(folder, out_root.as_deref(), &path);
             if sidecar_matches(&sc, &sha) {
+                state.log("DEBUG", &format!("up to date: {rel}"));
                 outcome.up_to_date += 1;
                 needs_api = false;
             } else if let Some(md) = cached_markdown(state, &sha) {
@@ -208,6 +224,13 @@ pub fn scan(
             continue;
         }
 
+        let kind_name = match kind {
+            FileKind::Image(_) => "image",
+            FileKind::Pdf => "pdf",
+            FileKind::Docx => "docx",
+            FileKind::Text => "text",
+            FileKind::Markdown | FileKind::Unsupported => unreachable!("filtered above"),
+        };
         let input = match build_input(&path, kind) {
             Ok(i) => i,
             Err(e) => {
@@ -219,7 +242,15 @@ pub fn scan(
             }
         };
 
+        state.log(
+            "DEBUG",
+            &format!(
+                "transcribing {rel} ({kind_name}, {} KB) via {backend_desc}",
+                meta.len() / 1024
+            ),
+        );
         outcome.api_calls += 1;
+        let started = std::time::Instant::now();
         match transcriber.transcribe(&input) {
             Ok(out) => {
                 write_atomic(
@@ -254,7 +285,14 @@ pub fn scan(
                 ledger.save(state)?;
                 failures.save(state)?;
                 outcome.transcribed += 1;
-                state.log("INFO", &format!("transcribed {rel}"));
+                state.log(
+                    "INFO",
+                    &format!(
+                        "transcribed {rel} in {:.1}s ({} chars)",
+                        started.elapsed().as_secs_f64(),
+                        out.markdown.chars().count()
+                    ),
+                );
             }
             Err(e) => {
                 // No sidecar on failure (R10); retried next sweep (R12).
