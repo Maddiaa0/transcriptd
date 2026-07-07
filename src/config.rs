@@ -10,7 +10,8 @@ pub const DEFAULT_PROMPT: &str = "You are a transcription engine. Convert the su
 - Preserve the document's structure: headings, lists, tables, emphasis.\n\
 - Use Markdown tables for tabular content; describe figures or diagrams briefly in italics.\n\
 - Mark genuinely unreadable words as [illegible].\n\
-- Output ONLY the Markdown transcript - no preamble, no commentary, no code fences.";
+- Output ONLY the Markdown transcript - no preamble, no commentary, no code fences.\n
+- Once complete - add a summary of important information and any key insights or findings to the top of the file.";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
