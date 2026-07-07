@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub const DEFAULT_MODEL: &str = "google/gemini-2.5-flash";
 pub const DEFAULT_MARKER: &str = "<!-- transcriptd:document -->";
@@ -28,6 +28,11 @@ pub struct Config {
     pub api_key: Option<String>,
     /// Environment variable holding the OpenRouter API key.
     pub api_key_env: String,
+    /// Where generated markdown (sidecars and rollups) is written, mirroring
+    /// the watched folder's structure. Unset: sidecars land next to their
+    /// source file and rollups at each marked folder's root. Relative paths
+    /// resolve against the watched folder.
+    pub output_dir: Option<String>,
     /// A folder whose index.md contains this string is a document (gets a rollup).
     pub marker: String,
     /// Filename of the stitched rollup written at a marked folder's root.
@@ -83,6 +88,7 @@ impl Default for Config {
             model: DEFAULT_MODEL.to_string(),
             api_key: None,
             api_key_env: "OPENROUTER_API_KEY".to_string(),
+            output_dir: None,
             marker: DEFAULT_MARKER.to_string(),
             rollup_name: DEFAULT_ROLLUP_NAME.to_string(),
             stability_seconds: 10,
@@ -126,6 +132,22 @@ impl Config {
 
     pub fn prompt(&self) -> &str {
         self.prompt.as_deref().unwrap_or(DEFAULT_PROMPT)
+    }
+
+    /// Root for generated markdown when `output_dir` redirects it; None means
+    /// the default in-place layout. Relative paths resolve against the
+    /// watched folder so a synced per-folder config works on every machine.
+    pub fn output_root(&self, folder: &Path) -> Option<PathBuf> {
+        let dir = self.output_dir.as_deref()?.trim();
+        if dir.is_empty() {
+            return None;
+        }
+        let path = Path::new(dir);
+        Some(if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            folder.join(path)
+        })
     }
 
     /// Env var first (systemd EnvironmentFile, shell exports), then the
@@ -205,6 +227,11 @@ model = "google/gemini-2.5-flash"
 # Environment variable holding the OpenRouter API key.
 api_key_env = "OPENROUTER_API_KEY"
 
+# Where generated markdown (sidecars and rollups) goes, mirroring the
+# folder's structure. Default: next to each source file. Relative paths
+# resolve against the watched folder.
+# output_dir = "transcripts"
+
 # A folder whose index.md contains this string is a document:
 # transcriptd maintains a stitched rollup at its root.
 marker = "<!-- transcriptd:document -->"
@@ -266,6 +293,28 @@ mod tests {
         let cfg = Config::load_layered(&[dir.path().join("nope.toml")]).unwrap();
         assert_eq!(cfg.model, DEFAULT_MODEL);
         assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn output_root_resolves_relative_absolute_and_empty() {
+        let folder = Path::new("/srv/notes");
+        let mut cfg = Config::default();
+        assert!(cfg.output_root(folder).is_none());
+
+        cfg.output_dir = Some("transcripts".to_string());
+        assert_eq!(
+            cfg.output_root(folder).unwrap(),
+            PathBuf::from("/srv/notes/transcripts")
+        );
+
+        cfg.output_dir = Some("/var/transcripts".to_string());
+        assert_eq!(
+            cfg.output_root(folder).unwrap(),
+            PathBuf::from("/var/transcripts")
+        );
+
+        cfg.output_dir = Some("  ".to_string());
+        assert!(cfg.output_root(folder).is_none());
     }
 
     #[test]

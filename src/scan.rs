@@ -93,6 +93,12 @@ pub fn scan(
     let mut hashes: BTreeMap<PathBuf, String> = BTreeMap::new();
     let now = SystemTime::now();
     let max_bytes = cfg.max_file_mb * 1024 * 1024;
+    let out_root = cfg.output_root(folder);
+    // An output tree inside the watched folder holds only generated markdown;
+    // never treat anything dropped there as a source.
+    let excluded_root = out_root
+        .clone()
+        .filter(|r| r != folder && r.starts_with(folder));
 
     let files: Vec<PathBuf> = WalkDir::new(folder)
         .sort_by_file_name()
@@ -101,6 +107,7 @@ pub fn scan(
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .map(|e| e.into_path())
+        .filter(|p| excluded_root.as_ref().is_none_or(|r| !p.starts_with(r)))
         .collect();
 
     for path in files {
@@ -168,7 +175,7 @@ pub fn scan(
         let mut needs_api = true;
         if let Some(entry) = ledger.entries.get(&sha).cloned() {
             // Hash already recorded: never re-sent to the API (R2).
-            let sc = sidecar_path(&path);
+            let sc = resolve_sidecar(folder, out_root.as_deref(), &path);
             if sidecar_matches(&sc, &sha) {
                 outcome.up_to_date += 1;
                 needs_api = false;
@@ -181,7 +188,7 @@ pub fn scan(
                     &entry.transcribed_at,
                     &md,
                 );
-                write_atomic(&sc, content.as_bytes())?;
+                write_output(&sc, content.as_bytes())?;
                 state.log("INFO", &format!("rebuilt sidecar from cache: {rel}"));
                 outcome.reused += 1;
                 needs_api = false;
@@ -227,7 +234,10 @@ pub fn scan(
                     &transcribed_at,
                     &out.markdown,
                 );
-                write_atomic(&sidecar_path(&path), content.as_bytes())?;
+                write_output(
+                    &resolve_sidecar(folder, out_root.as_deref(), &path),
+                    content.as_bytes(),
+                )?;
                 ledger.entries.insert(
                     sha.clone(),
                     LedgerEntry {
@@ -299,6 +309,24 @@ pub fn sidecar_path(path: &Path) -> PathBuf {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     path.with_file_name(format!("{name}.md"))
+}
+
+/// Where a source's sidecar lives: next to the source by default, or at the
+/// mirrored relative path under `output_dir` when configured.
+fn resolve_sidecar(folder: &Path, out_root: Option<&Path>, source: &Path) -> PathBuf {
+    match out_root {
+        None => sidecar_path(source),
+        Some(root) => root.join(sidecar_path(source.strip_prefix(folder).unwrap_or(source))),
+    }
+}
+
+/// write_atomic, creating parent directories first — a redirected output
+/// tree is built lazily as sidecars land in it.
+fn write_output(path: &Path, contents: &[u8]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    }
+    write_atomic(path, contents)
 }
 
 fn sidecar_matches(sidecar: &Path, sha: &str) -> bool {
@@ -393,10 +421,15 @@ fn stitch_rollups(
             sections.len(),
             sections.join("\n\n")
         );
-        let rollup_path = marked_folder.join(&cfg.rollup_name);
+        let rollup_path = match cfg.output_root(folder) {
+            None => marked_folder.join(&cfg.rollup_name),
+            Some(root) => root
+                .join(marked_folder.strip_prefix(folder).unwrap_or(marked_folder))
+                .join(&cfg.rollup_name),
+        };
         let existing = fs::read_to_string(&rollup_path).unwrap_or_default();
         if existing != content {
-            write_atomic(&rollup_path, content.as_bytes())?;
+            write_output(&rollup_path, content.as_bytes())?;
             state.log(
                 "INFO",
                 &format!("restitched rollup: {folder_rel}/{}", cfg.rollup_name),
