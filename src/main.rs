@@ -104,6 +104,20 @@ fn run() -> Result<ExitCode> {
                 }
                 println!("wrote {}", path.display());
             }
+            if !global {
+                // "init wrote a config that scan doesn't read" is the most
+                // reported confusion: make the two config kinds explicit.
+                println!(
+                    "note: this per-folder config is read only when scanning {}.",
+                    folder.display()
+                );
+                println!(
+                    "      machine-wide settings (backend, [cli] commands, api_key) belong in {} — run `transcriptd init --global`.",
+                    config::xdg_config_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "the global config".to_string())
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
         Command::Status => {
