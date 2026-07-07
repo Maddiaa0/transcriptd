@@ -106,12 +106,22 @@ backend = "openrouter"              # or "cli" — see below
 model = "google/gemini-2.5-flash"   # any vision-capable OpenRouter model
 # api_key = "sk-or-..."             # global config only
 api_key_env = "OPENROUTER_API_KEY"
+# output_dir = "transcripts"        # default: sidecars land next to sources
 marker = "<!-- transcriptd:document -->"
 rollup_name = "transcript.md"
 stability_seconds = 10
 pdf_engine = "native"               # native | pdf-text | mistral-ocr
 prompt_version = "1"                # bump when overriding `prompt`
 ```
+
+`output_dir` redirects all generated markdown — sidecars and rollups — into
+a separate tree that mirrors the folder's structure
+(`notebook/01.png` → `<output_dir>/notebook/01.png.md`), keeping the source
+folder clean. Relative paths resolve against the watched folder; absolute
+paths may point anywhere. An output tree inside the watched folder is never
+scanned as a source. Changing `output_dir` later is cheap: sidecars are
+rebuilt at the new location from cache, with no API calls (old ones are not
+deleted).
 
 ## Backends
 
