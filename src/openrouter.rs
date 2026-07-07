@@ -23,6 +23,7 @@ pub struct TranscribeInput {
     pub payload: Payload,
 }
 
+#[derive(Debug)]
 pub struct TranscribeOutput {
     pub markdown: String,
     /// Full API response, retained per R7 so richer schemas later need no
@@ -138,7 +139,7 @@ pub fn extract_markdown(raw: &Value) -> Result<String> {
 }
 
 /// Models sometimes wrap output in a code fence despite instructions.
-fn strip_fences(s: &str) -> String {
+pub(crate) fn strip_fences(s: &str) -> String {
     let trimmed = s.trim();
     if !trimmed.starts_with("```") {
         return trimmed.to_string();
@@ -151,7 +152,7 @@ fn strip_fences(s: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
-fn truncate(s: &str, max: usize) -> String {
+pub(crate) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {

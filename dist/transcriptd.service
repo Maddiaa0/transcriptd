@@ -12,9 +12,13 @@ Type=oneshot
 ExecStart=/usr/local/bin/transcriptd --folder /srv/notes scan
 User=notes
 # Provide OPENROUTER_API_KEY (or whatever api_key_env names in config.toml).
+# Not needed with backend = "cli"; then this file can be empty or removed.
 EnvironmentFile=/etc/transcriptd/env
 # The daemon only needs to write inside the watched folder.
 ProtectSystem=strict
 ReadWritePaths=/srv/notes
+# backend = "cli": the agent CLI must be able to write its own state dir
+# (auth token refresh, session logs), e.g. for Codex as User=notes:
+# ReadWritePaths=/srv/notes /home/notes/.codex
 PrivateTmp=true
 NoNewPrivileges=true

@@ -3,13 +3,14 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use transcriptd::cli::CliTranscriber;
 use transcriptd::config::{self, Config, EXAMPLE_CONFIG, EXAMPLE_GLOBAL_CONFIG};
-use transcriptd::openrouter::OpenRouterClient;
+use transcriptd::openrouter::{OpenRouterClient, Transcriber};
 use transcriptd::state::{write_atomic, Failures, Ledger, StateDir};
 use transcriptd::{scan, watch};
 
 /// Folder transcription daemon: monitors a folder and transcribes new or
-/// changed files into markdown via OpenRouter.
+/// changed files into markdown via OpenRouter or a local agent CLI.
 #[derive(Parser)]
 #[command(name = "transcriptd", version, about)]
 struct Cli {
@@ -126,21 +127,27 @@ fn run() -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Command::Scan { watch: watch_mode } => {
-            let api_key = cfg.resolve_api_key().with_context(|| {
-                format!(
-                    "no API key: set the {} environment variable, or api_key in {}",
-                    cfg.api_key_env,
-                    config::xdg_config_path()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_else(|| "the global config".to_string())
-                )
-            })?;
-            let client = OpenRouterClient::new(&cfg, api_key)?;
+            let client: Box<dyn Transcriber> = match cfg.backend.as_str() {
+                "openrouter" => {
+                    let api_key = cfg.resolve_api_key().with_context(|| {
+                        format!(
+                            "no API key: set the {} environment variable, or api_key in {}",
+                            cfg.api_key_env,
+                            config::xdg_config_path()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_else(|| "the global config".to_string())
+                        )
+                    })?;
+                    Box::new(OpenRouterClient::new(&cfg, api_key)?)
+                }
+                "cli" => Box::new(CliTranscriber::new(&cfg)?),
+                other => bail!("unknown backend \"{other}\": expected \"openrouter\" or \"cli\""),
+            };
             if watch_mode {
-                watch::watch(&folder, &cfg, &state, &client)?;
+                watch::watch(&folder, &cfg, &state, client.as_ref())?;
                 Ok(ExitCode::SUCCESS) // unreachable: watch loops forever
             } else {
-                let outcome = scan::scan(&folder, &cfg, &state, &client)?;
+                let outcome = scan::scan(&folder, &cfg, &state, client.as_ref())?;
                 println!("scan complete: {}", outcome.summary());
                 if outcome.failed > 0 {
                     Ok(ExitCode::FAILURE)

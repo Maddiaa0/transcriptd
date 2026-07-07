@@ -15,7 +15,11 @@ pub const DEFAULT_PROMPT: &str = "You are a transcription engine. Convert the su
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    /// OpenRouter model id used for transcription.
+    /// Transcription backend: "openrouter" (HTTP API, the default) or "cli"
+    /// (shell out to a local agent CLI such as OpenAI Codex — see [cli]).
+    pub backend: String,
+    /// OpenRouter model id used for transcription. With backend = "cli" this
+    /// is only a provenance label recorded in sidecar frontmatter.
     pub model: String,
     /// OpenRouter API key. Belongs in the global config file
     /// (~/.config/transcriptd/config.toml), not the in-folder one, which
@@ -39,15 +43,42 @@ pub struct Config {
     pub prompt: Option<String>,
     /// Recorded in sidecar frontmatter so transcripts are traceable to a prompt.
     pub prompt_version: String,
+    /// HTTP request timeout; with backend = "cli", how long a command may run.
     pub request_timeout_seconds: u64,
     pub api_base: String,
     /// Files larger than this are skipped (logged once), not sent to the API.
     pub max_file_mb: u64,
+    /// Settings for backend = "cli". Note: layering replaces this table
+    /// wholesale — a folder config with a [cli] section overrides the global
+    /// one entirely, not key by key.
+    pub cli: CliConfig,
+}
+
+/// How to invoke a local agent CLI (OpenAI Codex, hermes, ...) as the
+/// transcription backend. Each command is an argv template; the placeholders
+/// {file}, {prompt} and {output} are substituted inside each argument:
+///   {file}   — path to a temp copy of the document (image/pdf bytes, or
+///              extracted text as .txt for docx/text files)
+///   {prompt} — the transcription prompt
+///   {output} — temp path the command should write the transcript to; when a
+///              template has no {output}, stdout is the transcript instead
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CliConfig {
+    /// Fallback argv template used for any file kind without an override.
+    pub command: Vec<String>,
+    /// Override for images (png/jpg/webp), e.g. Codex's `-i` attachment flag.
+    pub image_command: Option<Vec<String>>,
+    /// Override for PDFs.
+    pub pdf_command: Option<Vec<String>>,
+    /// Override for text payloads (txt/csv/html and extracted docx).
+    pub text_command: Option<Vec<String>>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
+            backend: "openrouter".to_string(),
             model: DEFAULT_MODEL.to_string(),
             api_key: None,
             api_key_env: "OPENROUTER_API_KEY".to_string(),
@@ -62,6 +93,7 @@ impl Default for Config {
             request_timeout_seconds: 300,
             api_base: "https://openrouter.ai/api/v1".to_string(),
             max_file_mb: 32,
+            cli: CliConfig::default(),
         }
     }
 }
@@ -124,20 +156,47 @@ pub const EXAMPLE_GLOBAL_CONFIG: &str = r#"# transcriptd global configuration (~
 # Settings here apply to every watched folder; a folder's own
 # .transcriptd/config.toml overrides them key by key.
 
+# Transcription backend: "openrouter" (HTTP API, default) or "cli" (shell out
+# to a local agent CLI — use an existing subscription instead of API credit).
+# backend = "openrouter"
+
 # Any vision-capable model on OpenRouter; swapping requires no code change.
+# With backend = "cli" this is only a provenance label recorded in sidecars
+# (set it to e.g. "codex" or "codex/gpt-5.1").
 model = "google/gemini-2.5-flash"
 
-# OpenRouter API key. Keep it here (or in the environment) rather than in a
-# watched folder's config, which syncs with the corpus. The environment
-# variable below takes precedence when set.
+# OpenRouter API key (not needed with backend = "cli"). Keep it here (or in
+# the environment) rather than in a watched folder's config, which syncs with
+# the corpus. The environment variable below takes precedence when set.
 # api_key = "sk-or-..."
 api_key_env = "OPENROUTER_API_KEY"
+
+# Command templates for backend = "cli". Placeholders substituted inside each
+# argument:
+#   {file}   — temp copy of the document (image/pdf; docx/text arrive as .txt)
+#   {prompt} — the transcription prompt
+#   {output} — temp file the command should write the transcript to; omit
+#              {output} from the template to read the transcript from stdout
+#
+# Example: OpenAI Codex CLI (rides your ChatGPT subscription — run
+# `codex login` once first). Codex attaches images with -i; other kinds get
+# the file path appended to the prompt so the agent reads it itself.
+# [cli]
+# command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
+# image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "{prompt}"]
+#
+# Any other agent CLI (hermes, claude, ...) works the same way — one argv
+# template that receives the file and prompt and emits markdown.
 "#;
 
 pub const EXAMPLE_CONFIG: &str = r#"# transcriptd per-folder configuration
 # Overrides the global config (~/.config/transcriptd/config.toml) key by key.
 # The OpenRouter API key belongs in the global config or the environment,
 # NOT here - this file lives inside the synced corpus.
+
+# Transcription backend: "openrouter" (default) or "cli". The [cli] command
+# templates belong in the global config — they are machine-specific.
+# backend = "openrouter"
 
 # Any vision-capable model on OpenRouter; swapping requires no code change.
 model = "google/gemini-2.5-flash"
@@ -167,6 +226,7 @@ pdf_engine = "native"
 prompt_version = "1"
 # prompt = "Custom transcription prompt..."
 
+# HTTP request timeout; with backend = "cli", how long a command may run.
 request_timeout_seconds = 300
 api_base = "https://openrouter.ai/api/v1"
 max_file_mb = 32
@@ -205,6 +265,33 @@ mod tests {
         let cfg = Config::load_layered(&[dir.path().join("nope.toml")]).unwrap();
         assert_eq!(cfg.model, DEFAULT_MODEL);
         assert!(cfg.api_key.is_none());
+    }
+
+    #[test]
+    fn cli_backend_settings_parse_and_layer() {
+        let dir = tempfile::tempdir().unwrap();
+        let global = dir.path().join("global.toml");
+        let folder = dir.path().join("folder.toml");
+        std::fs::write(
+            &global,
+            r#"
+backend = "cli"
+model = "codex"
+[cli]
+command = ["codex", "exec", "{prompt}", "{file}"]
+image_command = ["codex", "exec", "-i", "{file}", "{prompt}"]
+"#,
+        )
+        .unwrap();
+        // A folder layer without a [cli] table keeps the global one.
+        std::fs::write(&folder, "stability_seconds = 5\n").unwrap();
+
+        let cfg = Config::load_layered(&[global, folder]).unwrap();
+        assert_eq!(cfg.backend, "cli");
+        assert_eq!(cfg.cli.command[0], "codex");
+        assert_eq!(cfg.cli.image_command.as_ref().unwrap()[2], "-i".to_string());
+        assert!(cfg.cli.pdf_command.is_none());
+        assert_eq!(cfg.stability_seconds, 5);
     }
 
     #[test]

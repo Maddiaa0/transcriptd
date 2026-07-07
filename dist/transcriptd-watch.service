@@ -13,6 +13,8 @@ Restart=on-failure
 RestartSec=10
 ProtectSystem=strict
 ReadWritePaths=/srv/notes
+# backend = "cli": also grant the agent CLI's state dir, e.g.
+# ReadWritePaths=/srv/notes /home/notes/.codex
 PrivateTmp=true
 NoNewPrivileges=true
 
