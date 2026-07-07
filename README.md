@@ -77,6 +77,7 @@ Anything else is logged as skipped, once, and the sweep continues.
 
 ```sh
 transcriptd init --global                     # global config: API key + default model
+transcriptd init --global --backend cli       # ready-to-use OpenAI Codex CLI setup
 transcriptd --folder /srv/notes init          # per-folder config template
 transcriptd --folder /srv/notes scan          # one sweep, exits non-zero if any file failed
 transcriptd --folder /srv/notes scan --watch  # keep running, rescan on fs events + timer
@@ -191,9 +192,16 @@ argument:
   for CLIs with clean stdout).
 
 `command` is the fallback for every file kind; `image_command`,
-`pdf_command`, and `text_command` override it per kind. Example for the
-OpenAI Codex CLI (run `codex login` once first) in
-`~/.config/transcriptd/config.toml`:
+`pdf_command`, and `text_command` override it per kind.
+
+For the OpenAI Codex CLI, skip hand-editing entirely — this writes a working
+global config (then run `codex login` once):
+
+```sh
+transcriptd init --global --backend cli
+```
+
+which contains:
 
 ```toml
 backend = "cli"
@@ -201,9 +209,11 @@ model = "codex"   # provenance label recorded in sidecar frontmatter
 
 [cli]
 # Codex attaches images natively with -i; for PDFs/text the file path is
-# appended to the prompt and the agent reads it itself.
-command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
-image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "{prompt}"]
+# appended to the prompt and the agent reads it itself. The "--" is
+# required: codex's -i flag is variadic and would otherwise swallow the
+# prompt as another image path.
+command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "--", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
+image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "--", "{prompt}"]
 ```
 
 Any other CLI (hermes, claude, …) plugs in the same way — one argv template
