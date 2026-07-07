@@ -8,7 +8,7 @@ use transcriptd::config::{
     self, Config, EXAMPLE_CONFIG, EXAMPLE_GLOBAL_CONFIG, EXAMPLE_GLOBAL_CONFIG_CLI,
 };
 use transcriptd::openrouter::{OpenRouterClient, Transcriber};
-use transcriptd::state::{write_atomic, Failures, Ledger, StateDir};
+use transcriptd::state::{self, write_atomic, Failures, Ledger, StateDir};
 use transcriptd::{scan, watch};
 
 /// Folder transcription daemon: monitors a folder and transcribes new or
@@ -23,6 +23,13 @@ struct Cli {
     /// Config file path (default: <folder>/.transcriptd/config.toml)
     #[arg(long, global = true)]
     config: Option<PathBuf>,
+
+    /// Increase log detail: -v shows per-file decisions (DEBUG), -vv adds
+    /// backend command invocations and timings (TRACE). The LOG_LEVEL
+    /// environment variable (error|warn|info|debug|trace) is used when no
+    /// -v flag is given.
+    #[arg(short = 'v', long = "verbose", action = clap::ArgAction::Count, global = true)]
+    verbose: u8,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -64,6 +71,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<ExitCode> {
     let cli = Cli::parse();
+    state::set_log_level(resolve_log_level(cli.verbose)?);
     let folder = cli
         .folder
         .canonicalize()
@@ -202,6 +210,22 @@ fn run() -> Result<ExitCode> {
                 }
             }
         }
+    }
+}
+
+/// -v flags win; otherwise LOG_LEVEL from the environment; otherwise Info.
+fn resolve_log_level(verbose: u8) -> Result<state::Level> {
+    match verbose {
+        0 => match std::env::var("LOG_LEVEL") {
+            Ok(v) if !v.trim().is_empty() => state::Level::parse(v.trim()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "invalid LOG_LEVEL \"{v}\": expected error, warn, info, debug, or trace"
+                )
+            }),
+            _ => Ok(state::Level::Info),
+        },
+        1 => Ok(state::Level::Debug),
+        _ => Ok(state::Level::Trace),
     }
 }
 

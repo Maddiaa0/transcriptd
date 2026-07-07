@@ -99,6 +99,17 @@ impl Transcriber for OpenRouterClient {
                 json!([{ "id": "file-parser", "pdf": { "engine": self.pdf_engine } }]);
         }
 
+        if crate::state::log_level() >= crate::state::Level::Trace {
+            crate::state::console_log(
+                crate::state::Level::Trace,
+                &format!(
+                    "POST {}/chat/completions model={} ({} KB body)",
+                    self.api_base,
+                    self.model,
+                    body.to_string().len() / 1024
+                ),
+            );
+        }
         let resp = self
             .http
             .post(format!("{}/chat/completions", self.api_base))

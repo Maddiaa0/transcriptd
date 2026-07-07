@@ -10,6 +10,7 @@ use crate::config::{CliConfig, Config};
 use crate::openrouter::{
     strip_fences, truncate, Payload, TranscribeInput, TranscribeOutput, Transcriber,
 };
+use crate::state::{console_log, Level};
 
 /// Transcribes by shelling out to a local agent CLI (OpenAI Codex, hermes,
 /// ...) instead of the OpenRouter API, so an existing subscription can pay
@@ -90,10 +91,23 @@ impl Transcriber for CliTranscriber {
             })
             .collect();
 
+        let preview: Vec<String> = argv.iter().map(|a| truncate(a, 120)).collect();
+        console_log(Level::Trace, &format!("running: {}", preview.join(" ")));
+        let started = std::time::Instant::now();
         let mut cmd = Command::new(&argv[0]);
         cmd.args(&argv[1..]);
         let (status, stdout, stderr) = run_with_timeout(cmd, self.timeout)
             .with_context(|| format!("running {} for {}", argv[0], input.filename))?;
+        console_log(
+            Level::Trace,
+            &format!(
+                "{} finished in {:.1}s ({status}, {} bytes stdout, {} bytes stderr)",
+                argv[0],
+                started.elapsed().as_secs_f64(),
+                stdout.len(),
+                stderr.len()
+            ),
+        );
         if !status.success() {
             bail!(
                 "{} exited with {status} for {}: {}",
