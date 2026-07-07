@@ -1,10 +1,10 @@
 # transcriptd
 
 A folder transcription daemon. It monitors one folder for new and changed
-files and transcribes them into markdown via [OpenRouter](https://openrouter.ai),
-so anything dropped into the folder — handwritten note pages, PDFs, office
-documents — becomes plain text that `rg`, agents, and knowledge-base tools can
-consume.
+files and transcribes them into markdown via [OpenRouter](https://openrouter.ai)
+or a local agent CLI (OpenAI Codex, hermes, …), so anything dropped into the
+folder — handwritten note pages, PDFs, office documents — becomes plain text
+that `rg`, agents, and knowledge-base tools can consume.
 
 ## How it works
 
@@ -102,6 +102,7 @@ The API key itself resolves as: `$OPENROUTER_API_KEY` (or whatever
 `api_key_env` names) if set, else `api_key` from the merged config.
 
 ```toml
+backend = "openrouter"              # or "cli" — see below
 model = "google/gemini-2.5-flash"   # any vision-capable OpenRouter model
 # api_key = "sk-or-..."             # global config only
 api_key_env = "OPENROUTER_API_KEY"
@@ -111,6 +112,76 @@ stability_seconds = 10
 pdf_engine = "native"               # native | pdf-text | mistral-ocr
 prompt_version = "1"                # bump when overriding `prompt`
 ```
+
+## Backends
+
+### OpenRouter (default)
+
+`backend = "openrouter"` sends files to the OpenRouter chat-completions API
+and needs an API key (see above).
+
+### Local agent CLI (`backend = "cli"`)
+
+`backend = "cli"` shells out to any agent CLI instead, so transcription can
+ride a subscription you already pay for (e.g. ChatGPT via the Codex CLI)
+rather than metered API credit. No API key is needed; auth is whatever the
+CLI itself uses.
+
+Commands are argv templates. Three placeholders are substituted inside each
+argument:
+
+- `{file}` — path to a temp copy of the document (image/PDF bytes; docx and
+  text files arrive as extracted plain text with a `.txt` extension)
+- `{prompt}` — the transcription prompt
+- `{output}` — a temp path the command should write the transcript to. If the
+  template has no `{output}`, stdout is the transcript instead (only suitable
+  for CLIs with clean stdout).
+
+`command` is the fallback for every file kind; `image_command`,
+`pdf_command`, and `text_command` override it per kind. Example for the
+OpenAI Codex CLI (run `codex login` once first) in
+`~/.config/transcriptd/config.toml`:
+
+```toml
+backend = "cli"
+model = "codex"   # provenance label recorded in sidecar frontmatter
+
+[cli]
+# Codex attaches images natively with -i; for PDFs/text the file path is
+# appended to the prompt and the agent reads it itself.
+command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "{prompt}\n\nThe document to transcribe is the file at: {file}"]
+image_command = ["codex", "exec", "--skip-git-repo-check", "--output-last-message", "{output}", "-i", "{file}", "{prompt}"]
+```
+
+Any other CLI (hermes, claude, …) plugs in the same way — one argv template
+that receives the file and prompt and emits markdown. A non-zero exit,
+empty output, or a run longer than `request_timeout_seconds` is recorded as
+a failure and retried next sweep, same as an API error. Note that layering
+replaces the `[cli]` table wholesale rather than key by key, and `pdf_engine`
+has no effect with this backend.
+
+#### Headless / remote machines
+
+transcriptd does no auth of its own for this backend — the CLI's normal
+login must exist **on the machine that runs the scans**, in the home of the
+**user the service runs as**. For Codex on a box with no browser, either:
+
+- **Log in through an SSH tunnel:** `ssh -L 1455:localhost:1455 user@remote`,
+  run `codex login` on the remote, and open the printed URL in your local
+  browser. Each machine then refreshes its own tokens independently
+  (recommended).
+- **Copy the credentials:** `scp ~/.codex/auth.json remote:~/.codex/` from a
+  logged-in machine (mode 600, owned by the service user). Codex rotates
+  tokens on refresh, so a copy shared across machines can eventually
+  invalidate itself; if scans start failing with auth errors in
+  `transcriptd status`, re-copy or switch to a real login.
+
+The CLI must be able to *write* its state dir (e.g. `~/.codex`) at runtime
+for token refresh — under the hardened systemd units in `dist/` that means
+adding it to `ReadWritePaths` (see the comments in the unit files). Systemd
+also runs with a minimal `PATH`, so use an absolute path to the CLI in the
+`[cli]` command templates (npm- or nvm-installed binaries won't be found
+otherwise).
 
 ## Deployment
 
