@@ -105,7 +105,10 @@ impl Transcriber for CliTranscriber {
 
         let text = if wants_output {
             fs::read_to_string(&output.0).with_context(|| {
-                format!("{} succeeded but wrote nothing to the {{output}} file", argv[0])
+                format!(
+                    "{} succeeded but wrote nothing to the {{output}} file",
+                    argv[0]
+                )
             })?
         } else {
             stdout

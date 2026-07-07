@@ -289,10 +289,7 @@ image_command = ["codex", "exec", "-i", "{file}", "{prompt}"]
         let cfg = Config::load_layered(&[global, folder]).unwrap();
         assert_eq!(cfg.backend, "cli");
         assert_eq!(cfg.cli.command[0], "codex");
-        assert_eq!(
-            cfg.cli.image_command.as_ref().unwrap()[2],
-            "-i".to_string()
-        );
+        assert_eq!(cfg.cli.image_command.as_ref().unwrap()[2], "-i".to_string());
         assert!(cfg.cli.pdf_command.is_none());
         assert_eq!(cfg.stability_seconds, 5);
     }
