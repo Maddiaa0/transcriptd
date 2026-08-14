@@ -1,13 +1,19 @@
 use anyhow::{Context, Result};
-use std::io::Read as _;
+use std::io::{Cursor, Read as _};
 use std::path::Path;
 
 /// Pull the text out of a .docx (a zip containing word/document.xml). The
 /// result is rough plain text; the model does the markdown formatting.
 pub fn docx_to_text(path: &Path) -> Result<String> {
-    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut zip = zip::ZipArchive::new(file)
-        .with_context(|| format!("{} is not a valid docx archive", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    docx_bytes_to_text(&bytes).with_context(|| format!("extracting {}", path.display()))
+}
+
+/// Extract a DOCX from an in-memory source snapshot. Keeping extraction on the
+/// same bytes that were hashed prevents a concurrent writer from changing the
+/// document between cache-key calculation and transcription.
+pub fn docx_bytes_to_text(bytes: &[u8]) -> Result<String> {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).context("invalid docx archive")?;
     let mut xml = String::new();
     zip.by_name("word/document.xml")
         .context("docx has no word/document.xml")?

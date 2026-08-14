@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use walkdir::{DirEntry, WalkDir};
@@ -188,13 +189,14 @@ pub fn scan(
             continue;
         }
 
-        let sha = match hash_file(&path) {
-            Ok(s) => s,
+        let source_bytes = match read_source_bytes(&path, max_bytes) {
+            Ok(bytes) => bytes,
             Err(e) => {
-                state.log("WARN", &format!("cannot hash {rel}: {e}"));
+                state.log("WARN", &format!("cannot snapshot {rel}: {e:#}"));
                 continue;
             }
         };
+        let sha = hash_bytes(&source_bytes);
         expected_sidecars.insert(sidecar.clone(), Some(sha.clone()));
         hashes.insert(path.clone(), sha.clone());
 
@@ -239,8 +241,8 @@ pub fn scan(
             FileKind::Text => "text",
             FileKind::Markdown | FileKind::Unsupported => unreachable!("filtered above"),
         };
-        let input = match build_input(&path, kind) {
-            Ok(i) => i,
+        let input = match build_input(&path, kind, source_bytes) {
+            Ok(input) => input,
             Err(e) => {
                 state.log("ERROR", &format!("cannot read {rel}: {e:#}"));
                 failures.record(&rel, &sha, &format!("{e:#}"));
@@ -329,28 +331,47 @@ pub fn scan(
     Ok(outcome)
 }
 
-fn build_input(path: &Path, kind: FileKind) -> Result<TranscribeInput> {
+/// Read one bounded, immutable snapshot so the caller can derive both the
+/// cache key and model payload from those exact bytes. If the live file changes
+/// afterwards, the next sweep sees a different hash and processes it normally.
+fn read_source_bytes(path: &Path, max_bytes: u64) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .with_context(|| format!("opening {}", path.display()))?
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("reading {}", path.display()))?;
+    if bytes.len() as u64 > max_bytes {
+        anyhow::bail!("file grew beyond the configured size limit while being read");
+    }
+    Ok(bytes)
+}
+
+fn build_input(path: &Path, kind: FileKind, bytes: Vec<u8>) -> Result<TranscribeInput> {
     let filename = path
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
+
     let payload = match kind {
-        FileKind::Image(mime) => Payload::Image {
-            mime,
-            data: fs::read(path)?,
-        },
-        FileKind::Pdf => Payload::Pdf {
-            data: fs::read(path)?,
-        },
+        FileKind::Image(mime) => Payload::Image { mime, data: bytes },
+        FileKind::Pdf => Payload::Pdf { data: bytes },
         FileKind::Docx => Payload::Text {
-            body: extract::docx_to_text(path)?,
+            body: extract::docx_bytes_to_text(&bytes)?,
         },
         FileKind::Text => Payload::Text {
-            body: String::from_utf8_lossy(&fs::read(path)?).to_string(),
+            body: String::from_utf8_lossy(&bytes).to_string(),
         },
-        FileKind::Markdown | FileKind::Unsupported => unreachable!("filtered before build_input"),
+        FileKind::Markdown | FileKind::Unsupported => {
+            unreachable!("filtered before build_input")
+        }
     };
     Ok(TranscribeInput { filename, payload })
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 pub fn hash_file(path: &Path) -> Result<String> {
