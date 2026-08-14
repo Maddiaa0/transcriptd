@@ -136,15 +136,7 @@ pub fn scan(
         .filter(|r| r != folder && r.starts_with(folder))
         .collect();
 
-    let files: Vec<PathBuf> = WalkDir::new(folder)
-        .sort_by_file_name()
-        .into_iter()
-        .filter_entry(|e| !is_hidden(e))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_file())
-        .map(|e| e.into_path())
-        .filter(|p| !excluded_roots.iter().any(|r| p.starts_with(r)))
-        .collect();
+    let files = source_files(folder, &excluded_roots)?;
     state.log(
         "DEBUG",
         &format!("sweep start: {} files to consider", files.len()),
@@ -189,7 +181,11 @@ pub fn scan(
         let meta = match fs::metadata(&path) {
             Ok(m) => m,
             Err(e) => {
-                state.log("WARN", &format!("cannot stat {rel}: {e}"));
+                let error = format!("cannot stat {rel}: {e}");
+                state.log("ERROR", &error);
+                failures.record(&rel, "", &error);
+                failures.save(state)?;
+                outcome.failed += 1;
                 continue;
             }
         };
@@ -220,7 +216,11 @@ pub fn scan(
         let source_bytes = match read_source_bytes(&path, max_bytes) {
             Ok(bytes) => bytes,
             Err(e) => {
-                state.log("WARN", &format!("cannot snapshot {rel}: {e:#}"));
+                let error = format!("cannot snapshot {rel}: {e:#}");
+                state.log("ERROR", &error);
+                failures.record(&rel, "", &error);
+                failures.save(state)?;
+                outcome.failed += 1;
                 continue;
             }
         };
@@ -257,6 +257,7 @@ pub fn scan(
             }
         }
         if !needs_api {
+            failures.clear(&rel);
             continue;
         }
 
@@ -353,6 +354,27 @@ pub fn scan(
     ledger.save(state)?;
     failures.save(state)?;
     Ok(outcome)
+}
+
+fn source_files(folder: &Path, excluded_roots: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    let mut files = Vec::new();
+    for entry in WalkDir::new(folder)
+        .sort_by_file_name()
+        .into_iter()
+        .filter_entry(|entry| {
+            !is_hidden(entry)
+                && (entry.depth() == 0
+                    || !excluded_roots
+                        .iter()
+                        .any(|root| entry.path().starts_with(root)))
+        })
+    {
+        let entry = entry.with_context(|| format!("walking source tree {}", folder.display()))?;
+        if entry.file_type().is_file() {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(files)
 }
 
 /// Read one bounded, immutable snapshot so the caller can derive both the
@@ -458,8 +480,8 @@ fn reconcile_sidecars(
     expected: &BTreeMap<PathBuf, Option<String>>,
     generation: &GenerationKey,
 ) -> Result<()> {
-    for path in generated_markdown_files(output_root) {
-        let Some(recorded_sha) = managed_sidecar_sha(&path) else {
+    for path in generated_markdown_files(output_root)? {
+        let Some(recorded_sha) = managed_sidecar_sha(&path)? else {
             continue;
         };
         let keep = match expected.get(&path) {
@@ -486,8 +508,8 @@ fn reconcile_rollups(
     state: &StateDir,
     expected: &BTreeSet<PathBuf>,
 ) -> Result<()> {
-    for path in generated_markdown_files(rollup_root) {
-        if !expected.contains(&path) && is_managed_rollup(&path) {
+    for path in generated_markdown_files(rollup_root)? {
+        if !expected.contains(&path) && is_managed_rollup(&path)? {
             fs::remove_file(&path).with_context(|| format!("removing stale {}", path.display()))?;
             state.log(
                 "INFO",
@@ -498,40 +520,47 @@ fn reconcile_rollups(
     Ok(())
 }
 
-fn generated_markdown_files(root: &Path) -> Vec<PathBuf> {
-    if !root.exists() {
-        return Vec::new();
+fn generated_markdown_files(root: &Path) -> Result<Vec<PathBuf>> {
+    match fs::metadata(root) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("reading output tree {}", root.display()));
+        }
     }
-    WalkDir::new(root)
+    let mut files = Vec::new();
+    for entry in WalkDir::new(root)
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .filter(|path| matches!(classify(path), FileKind::Markdown))
-        .collect()
+    {
+        let entry = entry.with_context(|| format!("walking output tree {}", root.display()))?;
+        if entry.file_type().is_file() && matches!(classify(entry.path()), FileKind::Markdown) {
+            files.push(entry.into_path());
+        }
+    }
+    Ok(files)
 }
 
-fn managed_sidecar_sha(path: &Path) -> Option<String> {
-    let text = fs::read_to_string(path).ok()?;
-    let properties = frontmatter_properties(&text)?;
+fn managed_sidecar_sha(path: &Path) -> Result<Option<String>> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let Some(properties) = frontmatter_properties(&text) else {
+        return Ok(None);
+    };
     if !is_transcriptd_generated(&properties) {
-        return None;
+        return Ok(None);
     }
-    properties
+    Ok(properties
         .get("sha256")
         .and_then(|value| value.as_str())
-        .map(str::to_string)
+        .map(str::to_string))
 }
 
-fn is_managed_rollup(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|text| frontmatter_properties(&text))
-        .is_some_and(|properties| {
-            is_transcriptd_generated(&properties)
-                && properties.get("kind").and_then(|value| value.as_str()) == Some("rollup")
-        })
+fn is_managed_rollup(path: &Path) -> Result<bool> {
+    let text = fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    Ok(frontmatter_properties(&text).is_some_and(|properties| {
+        is_transcriptd_generated(&properties)
+            && properties.get("kind").and_then(|value| value.as_str()) == Some("rollup")
+    }))
 }
 
 fn is_transcriptd_generated(properties: &serde_json::Map<String, serde_json::Value>) -> bool {
@@ -636,7 +665,7 @@ fn stitch_rollups(
     if let Some(rollup_root) = cfg.rollup_root(folder) {
         return stitch_every_folder(folder, cfg, state, hashes, &rollup_root);
     }
-    let marked = find_marked_folders(folder, &cfg.marker);
+    let marked = find_marked_folders(folder, &cfg.marker)?;
     if marked.is_empty() {
         return Ok(RollupOutcome {
             written: 0,
@@ -777,20 +806,29 @@ fn rollup_content(folder_rel: &str, sections: &[String]) -> Result<String> {
     ))
 }
 
-fn find_marked_folders(folder: &Path, marker: &str) -> Vec<PathBuf> {
-    WalkDir::new(folder)
+fn find_marked_folders(folder: &Path, marker: &str) -> Result<Vec<PathBuf>> {
+    let mut marked = Vec::new();
+    for entry in WalkDir::new(folder)
         .sort_by_file_name()
         .into_iter()
         .filter_entry(|e| !is_hidden(e))
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().is_dir())
-        .map(|e| e.into_path())
-        .filter(|dir| {
-            fs::read_to_string(dir.join("index.md"))
-                .map(|text| text.contains(marker))
-                .unwrap_or(false)
-        })
-        .collect()
+    {
+        let entry = entry.with_context(|| format!("walking marker tree {}", folder.display()))?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let index = entry.path().join("index.md");
+        match fs::read_to_string(&index) {
+            Ok(text) if text.contains(marker) => marked.push(entry.into_path()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("reading marker file {}", index.display()));
+            }
+        }
+    }
+    Ok(marked)
 }
 
 fn nearest_marked_ancestor<'a>(
@@ -809,4 +847,18 @@ fn nearest_marked_ancestor<'a>(
         current = dir.parent();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_walk_errors_are_not_silently_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing");
+        let error = source_files(&missing, &[]).unwrap_err();
+
+        assert!(format!("{error:#}").contains("walking source tree"));
+    }
 }

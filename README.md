@@ -72,7 +72,9 @@ everything derived from it:
 
 Failure behavior is deliberately loud: a failed transcription never produces
 a sidecar, the failure is recorded with its error, and every subsequent sweep
-retries it. `transcriptd status` shows what's pending.
+retries it. Source stat/read failures are recorded the same way, while directory
+traversal and generated-output read failures abort the sweep with their path in
+the error. `transcriptd status` shows what's pending.
 
 Files modified within the last `stability_seconds` (default 10) are assumed
 mid-sync and deferred to the next sweep.

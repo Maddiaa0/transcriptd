@@ -580,3 +580,18 @@ fn failed_generation_refresh_does_not_reuse_old_output_in_rollups() {
     assert!(!sidecar.exists());
     assert!(!rollup.exists());
 }
+
+#[test]
+fn unreadable_marker_paths_are_reported_as_scan_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = test_config();
+    let state = setup(tmp.path());
+    let notebook = tmp.path().join("notebook");
+    fs::create_dir_all(notebook.join("index.md")).unwrap();
+    fs::write(notebook.join("page.png"), b"content").unwrap();
+
+    let error = scan(tmp.path(), &cfg, &state, &Mock::new()).unwrap_err();
+    let message = format!("{error:#}");
+    assert!(message.contains("reading marker file"), "{message}");
+    assert!(message.contains("index.md"), "{message}");
+}
