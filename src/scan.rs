@@ -52,6 +52,32 @@ enum FileKind {
     Unsupported,
 }
 
+#[derive(Debug)]
+struct GenerationKey {
+    backend: String,
+    model: String,
+    prompt_version: String,
+    prompt_sha256: String,
+}
+
+impl GenerationKey {
+    fn from_config(cfg: &Config) -> Self {
+        GenerationKey {
+            backend: cfg.backend.clone(),
+            model: cfg.model.clone(),
+            prompt_version: cfg.prompt_version.clone(),
+            prompt_sha256: hash_bytes(cfg.prompt().as_bytes()),
+        }
+    }
+
+    fn matches(&self, entry: &LedgerEntry) -> bool {
+        entry.backend == self.backend
+            && entry.model == self.model
+            && entry.prompt_version == self.prompt_version
+            && entry.prompt_sha256 == self.prompt_sha256
+    }
+}
+
 fn classify(path: &Path) -> FileKind {
     let ext = path
         .extension()
@@ -91,7 +117,8 @@ pub fn scan(
     let mut ledger = Ledger::load(state)?;
     let mut failures = Failures::load(state)?;
     let mut outcome = ScanOutcome::default();
-    // abs path -> content hash, for rollup stitching after the file pass
+    // abs path -> content hash for sources whose cached output matches the
+    // active generation settings, used for rollup stitching after the pass.
     let mut hashes: BTreeMap<PathBuf, String> = BTreeMap::new();
     // Generated sidecar path -> current source hash. A None value means the
     // source still exists but could not be checked this sweep (for example it
@@ -99,6 +126,7 @@ pub fn scan(
     let mut expected_sidecars: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
     let now = SystemTime::now();
     let max_bytes = cfg.max_file_mb * 1024 * 1024;
+    let generation = GenerationKey::from_config(cfg);
     let out_root = cfg.output_root(folder);
     // Output/rollup trees inside the watched folder hold only generated
     // markdown; never treat anything dropped there as a source.
@@ -198,28 +226,25 @@ pub fn scan(
         };
         let sha = hash_bytes(&source_bytes);
         expected_sidecars.insert(sidecar.clone(), Some(sha.clone()));
-        hashes.insert(path.clone(), sha.clone());
-
         let mut needs_api = true;
         if let Some(entry) = ledger.entries.get(&sha).cloned() {
-            // Hash already recorded: never re-sent to the API (R2).
-            if sidecar_matches(&sidecar, &sha) {
+            if !generation.matches(&entry) {
+                state.log(
+                    "INFO",
+                    &format!("generation settings changed for {rel}; re-transcribing"),
+                );
+            } else if sidecar_matches(&sidecar, &sha, &generation) {
                 state.log("DEBUG", &format!("up to date: {rel}"));
                 outcome.up_to_date += 1;
                 needs_api = false;
+                hashes.insert(path.clone(), sha.clone());
             } else if let Some(md) = cached_markdown(state, &sha) {
-                let content = sidecar_content(
-                    &path,
-                    &sha,
-                    &entry.model,
-                    &entry.prompt_version,
-                    &entry.transcribed_at,
-                    &md,
-                );
+                let content = sidecar_content(&path, &sha, &generation, &entry.transcribed_at, &md);
                 write_output(&sidecar, content.as_bytes())?;
                 state.log("INFO", &format!("rebuilt sidecar from cache: {rel}"));
                 outcome.reused += 1;
                 needs_api = false;
+                hashes.insert(path.clone(), sha.clone());
             } else {
                 state.log(
                     "WARN",
@@ -269,14 +294,8 @@ pub fn scan(
                 )?;
                 write_atomic(&state.cache_path(&sha), out.markdown.as_bytes())?;
                 let transcribed_at = now_rfc3339();
-                let content = sidecar_content(
-                    &path,
-                    &sha,
-                    &cfg.model,
-                    &cfg.prompt_version,
-                    &transcribed_at,
-                    &out.markdown,
-                );
+                let content =
+                    sidecar_content(&path, &sha, &generation, &transcribed_at, &out.markdown);
                 write_output(&sidecar, content.as_bytes())?;
                 ledger.entries.insert(
                     sha.clone(),
@@ -284,9 +303,12 @@ pub fn scan(
                         path: rel.clone(),
                         model: cfg.model.clone(),
                         prompt_version: cfg.prompt_version.clone(),
+                        backend: cfg.backend.clone(),
+                        prompt_sha256: generation.prompt_sha256.clone(),
                         transcribed_at,
                     },
                 );
+                hashes.insert(path.clone(), sha.clone());
                 failures.clear(&rel);
                 // Save after every success so a crash never loses a paid call.
                 ledger.save(state)?;
@@ -316,6 +338,7 @@ pub fn scan(
         out_root.as_deref().unwrap_or(folder),
         state,
         &expected_sidecars,
+        &generation,
     )?;
 
     let rollups = stitch_rollups(folder, cfg, state, &hashes)?;
@@ -408,10 +431,22 @@ fn write_output(path: &Path, contents: &[u8]) -> Result<()> {
     write_atomic(path, contents)
 }
 
-fn sidecar_matches(sidecar: &Path, sha: &str) -> bool {
-    fs::read_to_string(sidecar)
-        .map(|text| text.contains(&format!("sha256: {sha}")))
-        .unwrap_or(false)
+fn sidecar_matches(sidecar: &Path, sha: &str, generation: &GenerationKey) -> bool {
+    let Ok(text) = fs::read_to_string(sidecar) else {
+        return false;
+    };
+    let Some(frontmatter) = markdown_frontmatter(&text) else {
+        return false;
+    };
+    [
+        format!("sha256: {sha}"),
+        format!("backend: {}", generation.backend),
+        format!("model: {}", generation.model),
+        format!("prompt_version: {}", generation.prompt_version),
+        format!("prompt_sha256: {}", generation.prompt_sha256),
+    ]
+    .iter()
+    .all(|expected| frontmatter.lines().any(|line| line == expected))
 }
 
 /// Remove generated sidecars whose source disappeared or whose recorded hash
@@ -422,13 +457,16 @@ fn reconcile_sidecars(
     output_root: &Path,
     state: &StateDir,
     expected: &BTreeMap<PathBuf, Option<String>>,
+    generation: &GenerationKey,
 ) -> Result<()> {
     for path in generated_markdown_files(output_root) {
         let Some(recorded_sha) = managed_sidecar_sha(&path) else {
             continue;
         };
         let keep = match expected.get(&path) {
-            Some(Some(current_sha)) => current_sha == &recorded_sha,
+            Some(Some(current_sha)) => {
+                current_sha == &recorded_sha && sidecar_matches(&path, current_sha, generation)
+            }
             Some(None) => true,
             None => false,
         };
@@ -530,8 +568,7 @@ fn cached_markdown(state: &StateDir, sha: &str) -> Option<String> {
 fn sidecar_content(
     source: &Path,
     sha: &str,
-    model: &str,
-    prompt_version: &str,
+    generation: &GenerationKey,
     transcribed_at: &str,
     markdown: &str,
 ) -> String {
@@ -540,7 +577,11 @@ fn sidecar_content(
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     format!(
-        "---\nsource: {name}\nsha256: {sha}\nmodel: {model}\nprompt_version: {prompt_version}\ntranscribed_at: {transcribed_at}\ngenerator: transcriptd {}\n---\n\n{markdown}\n",
+        "---\nsource: {name}\nsha256: {sha}\nbackend: {}\nmodel: {}\nprompt_version: {}\nprompt_sha256: {}\ntranscribed_at: {transcribed_at}\ngenerator: transcriptd {}\n---\n\n{markdown}\n",
+        generation.backend,
+        generation.model,
+        generation.prompt_version,
+        generation.prompt_sha256,
         crate::VERSION
     )
 }

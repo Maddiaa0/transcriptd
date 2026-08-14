@@ -187,6 +187,12 @@ pub struct LedgerEntry {
     pub path: String,
     pub model: String,
     pub prompt_version: String,
+    /// Generation settings are part of cache identity. Defaults preserve
+    /// compatibility with older ledgers and deliberately cause one refresh.
+    #[serde(default)]
+    pub backend: String,
+    #[serde(default)]
+    pub prompt_sha256: String,
     pub transcribed_at: String,
 }
 

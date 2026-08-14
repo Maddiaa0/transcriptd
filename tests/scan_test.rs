@@ -460,5 +460,80 @@ fn sidecar_frontmatter_records_provenance() {
     assert!(sidecar.contains("source: a.png"));
     assert!(sidecar.contains("sha256: "));
     assert!(sidecar.contains(&format!("model: {}", cfg.model)));
+    assert!(sidecar.contains(&format!("backend: {}", cfg.backend)));
     assert!(sidecar.contains(&format!("prompt_version: {}", cfg.prompt_version)));
+    assert!(sidecar.contains("prompt_sha256: "));
+}
+
+#[test]
+fn generation_setting_changes_refresh_existing_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let state = setup(tmp.path());
+    fs::write(tmp.path().join("page.png"), b"unchanged content").unwrap();
+    let mock = Mock::new();
+
+    let cfg = test_config();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(mock.calls.get(), 1);
+
+    let changed_model = Config {
+        model: "example/new-model".to_string(),
+        ..cfg.clone()
+    };
+    let outcome = scan(tmp.path(), &changed_model, &state, &mock).unwrap();
+    assert_eq!(outcome.transcribed, 1);
+    assert_eq!(mock.calls.get(), 2);
+
+    let changed_backend = Config {
+        backend: "cli".to_string(),
+        ..changed_model.clone()
+    };
+    scan(tmp.path(), &changed_backend, &state, &mock).unwrap();
+    assert_eq!(mock.calls.get(), 3);
+
+    let changed_prompt_version = Config {
+        prompt_version: "2".to_string(),
+        ..changed_backend.clone()
+    };
+    scan(tmp.path(), &changed_prompt_version, &state, &mock).unwrap();
+    assert_eq!(mock.calls.get(), 4);
+
+    // The actual prompt is fingerprinted too, so forgetting to bump the
+    // human-readable version cannot silently retain old output.
+    let changed_prompt = Config {
+        prompt: Some("A materially different prompt".to_string()),
+        ..changed_prompt_version
+    };
+    scan(tmp.path(), &changed_prompt, &state, &mock).unwrap();
+    assert_eq!(mock.calls.get(), 5);
+}
+
+#[test]
+fn failed_generation_refresh_does_not_reuse_old_output_in_rollups() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        output_dir: Some("generated".to_string()),
+        rollup_dir: Some("generated".to_string()),
+        ..test_config()
+    };
+    let state = setup(tmp.path());
+    fs::write(tmp.path().join("page.png"), b"unchanged content").unwrap();
+    let mock = Mock::new();
+
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    let sidecar = tmp.path().join("generated/page.png.md");
+    let rollup = tmp.path().join("generated/transcript.md");
+    assert!(sidecar.exists());
+    assert!(rollup.exists());
+
+    mock.fail_on("page.png");
+    let changed = Config {
+        model: "example/new-model".to_string(),
+        ..cfg
+    };
+    let outcome = scan(tmp.path(), &changed, &state, &mock).unwrap();
+
+    assert_eq!(outcome.failed, 1);
+    assert!(!sidecar.exists());
+    assert!(!rollup.exists());
 }

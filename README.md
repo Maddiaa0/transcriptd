@@ -16,9 +16,11 @@ transcriptd --folder /srv/notes scan
 ```
 
 Each sweep walks the folder, hashes every file (sha256), and diffs against a
-ledger. Content already transcribed is never re-sent to the API — regardless
-of mtime churn from sync tools or file renames. New or changed content is
-transcribed once and gets a markdown **sidecar** next to it
+ledger. Content already transcribed with the same backend, model, and prompt is
+never re-sent to the API — regardless of mtime churn from sync tools or file
+renames. Changing any generation setting intentionally refreshes the existing
+corpus. New or changed content is transcribed once and gets a markdown
+**sidecar** next to it
 (`page.png` → `page.png.md`) with provenance frontmatter:
 
 ```markdown
@@ -26,7 +28,9 @@ transcribed once and gets a markdown **sidecar** next to it
 source: page.png
 sha256: 4f2a…
 model: google/gemini-2.5-flash
+backend: openrouter
 prompt_version: 1
+prompt_sha256: 8d7a…
 transcribed_at: 2026-06-11T10:00:00Z
 generator: transcriptd 0.1.0
 ---
