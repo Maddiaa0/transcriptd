@@ -3,6 +3,7 @@ use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
@@ -46,6 +47,29 @@ impl StateDir {
         self.root.join("raw").join(format!("{sha}.json"))
     }
 
+    /// Hold an exclusive advisory lock for one complete scan. This prevents a
+    /// timer, watcher, and manual invocation from loading the same ledger
+    /// snapshot and performing duplicate paid transcription calls.
+    pub fn acquire_scan_lock(&self) -> Result<ScanLock> {
+        use fs2::FileExt as _;
+
+        let path = self.root.join("scan.lock");
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)
+            .with_context(|| format!("opening scan lock {}", path.display()))?;
+        file.try_lock_exclusive().with_context(|| {
+            format!(
+                "another transcriptd scan is already running for {}",
+                self.root.display()
+            )
+        })?;
+        Ok(ScanLock { _file: file })
+    }
+
     /// Log to stderr and the in-folder log file, subject to the process log
     /// level (see set_log_level). Level is a string ("INFO") at call sites
     /// to keep them terse; unknown strings are treated as INFO.
@@ -63,6 +87,12 @@ impl StateDir {
             let _ = writeln!(f, "{line}");
         }
     }
+}
+
+/// The operating system releases the lock when this guard is dropped, even
+/// when a scan exits early with an error or the process terminates.
+pub struct ScanLock {
+    _file: fs::File,
 }
 
 /// Verbosity threshold: messages above the configured level are dropped.
@@ -243,5 +273,21 @@ mod tests {
         assert!(Level::Error < Level::Warn);
         assert!(Level::Info < Level::Debug);
         assert!(Level::Debug < Level::Trace);
+    }
+
+    #[test]
+    fn scan_lock_is_exclusive_and_released_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = StateDir::new(tmp.path()).unwrap();
+
+        let first = state.acquire_scan_lock().unwrap();
+        let err = state
+            .acquire_scan_lock()
+            .err()
+            .expect("second lock must fail");
+        assert!(format!("{err:#}").contains("another transcriptd scan"));
+
+        drop(first);
+        state.acquire_scan_lock().unwrap();
     }
 }

@@ -34,6 +34,10 @@ generator: transcriptd 0.1.0
 # Meeting notes …
 ```
 
+Only one sweep may operate on a watched folder at a time. A concurrent timer,
+watcher, or manual invocation exits with an error instead of duplicating API
+calls or racing while replacing the ledger.
+
 A folder whose `index.md` contains the configured marker
 (`<!-- transcriptd:document -->` by default) is treated as a **document**:
 transcriptd maintains a stitched `transcript.md` at its root, one section per

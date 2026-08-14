@@ -86,6 +86,7 @@ pub fn scan(
     state: &StateDir,
     transcriber: &dyn Transcriber,
 ) -> Result<ScanOutcome> {
+    let _scan_lock = state.acquire_scan_lock()?;
     let mut ledger = Ledger::load(state)?;
     let mut failures = Failures::load(state)?;
     let mut outcome = ScanOutcome::default();
