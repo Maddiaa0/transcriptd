@@ -239,7 +239,8 @@ pub fn scan(
                 needs_api = false;
                 hashes.insert(path.clone(), sha.clone());
             } else if let Some(md) = cached_markdown(state, &sha) {
-                let content = sidecar_content(&path, &sha, &generation, &entry.transcribed_at, &md);
+                let content =
+                    sidecar_content(&path, &sha, &generation, &entry.transcribed_at, &md)?;
                 write_output(&sidecar, content.as_bytes())?;
                 state.log("INFO", &format!("rebuilt sidecar from cache: {rel}"));
                 outcome.reused += 1;
@@ -295,7 +296,7 @@ pub fn scan(
                 write_atomic(&state.cache_path(&sha), out.markdown.as_bytes())?;
                 let transcribed_at = now_rfc3339();
                 let content =
-                    sidecar_content(&path, &sha, &generation, &transcribed_at, &out.markdown);
+                    sidecar_content(&path, &sha, &generation, &transcribed_at, &out.markdown)?;
                 write_output(&sidecar, content.as_bytes())?;
                 ledger.entries.insert(
                     sha.clone(),
@@ -435,18 +436,16 @@ fn sidecar_matches(sidecar: &Path, sha: &str, generation: &GenerationKey) -> boo
     let Ok(text) = fs::read_to_string(sidecar) else {
         return false;
     };
-    let Some(frontmatter) = markdown_frontmatter(&text) else {
+    let Some(properties) = frontmatter_properties(&text) else {
         return false;
     };
-    [
-        format!("sha256: {sha}"),
-        format!("backend: {}", generation.backend),
-        format!("model: {}", generation.model),
-        format!("prompt_version: {}", generation.prompt_version),
-        format!("prompt_sha256: {}", generation.prompt_sha256),
-    ]
-    .iter()
-    .all(|expected| frontmatter.lines().any(|line| line == expected))
+    properties.get("sha256").and_then(|v| v.as_str()) == Some(sha)
+        && properties.get("backend").and_then(|v| v.as_str()) == Some(generation.backend.as_str())
+        && properties.get("model").and_then(|v| v.as_str()) == Some(generation.model.as_str())
+        && properties.get("prompt_version").and_then(|v| v.as_str())
+            == Some(generation.prompt_version.as_str())
+        && properties.get("prompt_sha256").and_then(|v| v.as_str())
+            == Some(generation.prompt_sha256.as_str())
 }
 
 /// Remove generated sidecars whose source disappeared or whose recorded hash
@@ -515,28 +514,54 @@ fn generated_markdown_files(root: &Path) -> Vec<PathBuf> {
 
 fn managed_sidecar_sha(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
-    let frontmatter = markdown_frontmatter(&text)?;
-    if !frontmatter
-        .lines()
-        .any(|line| line.starts_with("generator: transcriptd "))
-    {
+    let properties = frontmatter_properties(&text)?;
+    if !is_transcriptd_generated(&properties) {
         return None;
     }
-    frontmatter
-        .lines()
-        .find_map(|line| line.strip_prefix("sha256: ").map(str::to_string))
+    properties
+        .get("sha256")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
 }
 
 fn is_managed_rollup(path: &Path) -> bool {
     fs::read_to_string(path)
         .ok()
-        .and_then(|text| markdown_frontmatter(&text).map(str::to_string))
-        .is_some_and(|frontmatter| {
-            frontmatter
-                .lines()
-                .any(|line| line.starts_with("generator: transcriptd "))
-                && frontmatter.lines().any(|line| line == "kind: rollup")
+        .and_then(|text| frontmatter_properties(&text))
+        .is_some_and(|properties| {
+            is_transcriptd_generated(&properties)
+                && properties.get("kind").and_then(|value| value.as_str()) == Some("rollup")
         })
+}
+
+fn is_transcriptd_generated(properties: &serde_json::Map<String, serde_json::Value>) -> bool {
+    properties
+        .get("generator")
+        .and_then(|value| value.as_str())
+        .is_some_and(|generator| generator.starts_with("transcriptd "))
+}
+
+/// Parse current JSON frontmatter plus the line-oriented YAML emitted by
+/// earlier transcriptd versions, so old managed outputs remain discoverable
+/// for cache checks and stale-output cleanup.
+fn frontmatter_properties(markdown: &str) -> Option<serde_json::Map<String, serde_json::Value>> {
+    let frontmatter = markdown_frontmatter(markdown)?;
+    if let Ok(serde_json::Value::Object(properties)) = serde_json::from_str(frontmatter) {
+        return Some(properties);
+    }
+
+    Some(
+        frontmatter
+            .lines()
+            .filter_map(|line| line.split_once(": "))
+            .map(|(key, value)| {
+                (
+                    key.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                )
+            })
+            .collect(),
+    )
 }
 
 fn markdown_frontmatter(markdown: &str) -> Option<&str> {
@@ -571,19 +596,25 @@ fn sidecar_content(
     generation: &GenerationKey,
     transcribed_at: &str,
     markdown: &str,
-) -> String {
+) -> Result<String> {
     let name = source
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    format!(
-        "---\nsource: {name}\nsha256: {sha}\nbackend: {}\nmodel: {}\nprompt_version: {}\nprompt_sha256: {}\ntranscribed_at: {transcribed_at}\ngenerator: transcriptd {}\n---\n\n{markdown}\n",
-        generation.backend,
-        generation.model,
-        generation.prompt_version,
-        generation.prompt_sha256,
-        crate::VERSION
-    )
+    let properties = serde_json::json!({
+        "backend": generation.backend,
+        "generator": format!("transcriptd {}", crate::VERSION),
+        "kind": "transcript",
+        "model": generation.model,
+        "prompt_sha256": generation.prompt_sha256,
+        "prompt_version": generation.prompt_version,
+        "sha256": sha,
+        "source": name,
+        "tags": ["transcriptd"],
+        "transcribed_at": transcribed_at,
+    });
+    let frontmatter = serde_json::to_string_pretty(&properties)?;
+    Ok(format!("---\n{frontmatter}\n---\n\n{markdown}\n"))
 }
 
 /// A folder whose index.md contains the configured marker is a document:
@@ -649,12 +680,7 @@ fn stitch_rollups(
         } else {
             folder_rel
         };
-        let content = format!(
-            "---\ngenerator: transcriptd {}\nkind: rollup\nfolder: {folder_rel}\nsections: {}\n---\n\n{}\n",
-            crate::VERSION,
-            sections.len(),
-            sections.join("\n\n")
-        );
+        let content = rollup_content(&folder_rel, &sections)?;
         let rollup_path = match cfg.output_root(folder) {
             None => marked_folder.join(&cfg.rollup_name),
             Some(root) => root
@@ -720,12 +746,7 @@ fn stitch_every_folder(
         } else {
             rel.to_string_lossy().to_string()
         };
-        let content = format!(
-            "---\ngenerator: transcriptd {}\nkind: rollup\nfolder: {folder_rel}\nsections: {}\n---\n\n{}\n",
-            crate::VERSION,
-            sections.len(),
-            sections.join("\n\n")
-        );
+        let content = rollup_content(&folder_rel, &sections)?;
         let rollup_path = rollup_root.join(rel).join(&cfg.rollup_name);
         let existing = fs::read_to_string(&rollup_path).unwrap_or_default();
         expected.insert(rollup_path.clone());
@@ -739,6 +760,21 @@ fn stitch_every_folder(
         }
     }
     Ok(RollupOutcome { written, expected })
+}
+
+fn rollup_content(folder_rel: &str, sections: &[String]) -> Result<String> {
+    let properties = serde_json::json!({
+        "folder": folder_rel,
+        "generator": format!("transcriptd {}", crate::VERSION),
+        "kind": "rollup",
+        "sections": sections.len(),
+        "tags": ["transcriptd"],
+    });
+    let frontmatter = serde_json::to_string_pretty(&properties)?;
+    Ok(format!(
+        "---\n{frontmatter}\n---\n\n{}\n",
+        sections.join("\n\n")
+    ))
 }
 
 fn find_marked_folders(folder: &Path, marker: &str) -> Vec<PathBuf> {

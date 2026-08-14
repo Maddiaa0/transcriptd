@@ -60,6 +60,13 @@ fn setup(dir: &Path) -> StateDir {
     StateDir::new(dir).unwrap()
 }
 
+fn frontmatter_json(path: &Path) -> serde_json::Value {
+    let markdown = fs::read_to_string(path).unwrap();
+    let rest = markdown.strip_prefix("---\n").unwrap();
+    let (frontmatter, _) = rest.split_once("\n---\n").unwrap();
+    serde_json::from_str(frontmatter).unwrap()
+}
+
 #[test]
 fn ae1_unchanged_rescan_makes_zero_api_calls() {
     let tmp = tempfile::tempdir().unwrap();
@@ -455,14 +462,50 @@ fn sidecar_frontmatter_records_provenance() {
 
     let mock = Mock::new();
     scan(tmp.path(), &cfg, &state, &mock).unwrap();
-    let sidecar = fs::read_to_string(sidecar_path(&tmp.path().join("a.png"))).unwrap();
-    assert!(sidecar.starts_with("---\n"));
-    assert!(sidecar.contains("source: a.png"));
-    assert!(sidecar.contains("sha256: "));
-    assert!(sidecar.contains(&format!("model: {}", cfg.model)));
-    assert!(sidecar.contains(&format!("backend: {}", cfg.backend)));
-    assert!(sidecar.contains(&format!("prompt_version: {}", cfg.prompt_version)));
-    assert!(sidecar.contains("prompt_sha256: "));
+    let properties = frontmatter_json(&sidecar_path(&tmp.path().join("a.png")));
+    assert_eq!(properties["source"], "a.png");
+    assert!(properties["sha256"].as_str().is_some_and(|v| !v.is_empty()));
+    assert_eq!(properties["model"], cfg.model);
+    assert_eq!(properties["backend"], cfg.backend);
+    assert_eq!(properties["prompt_version"], cfg.prompt_version);
+    assert!(properties["prompt_sha256"]
+        .as_str()
+        .is_some_and(|v| !v.is_empty()));
+    assert_eq!(properties["kind"], "transcript");
+    assert_eq!(properties["tags"], json!(["transcriptd"]));
+}
+
+#[test]
+fn frontmatter_preserves_yaml_significant_names_and_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        model: "vendor/model: latest # production".to_string(),
+        prompt_version: "v2: #review".to_string(),
+        rollup_dir: Some("generated".to_string()),
+        ..test_config()
+    };
+    let state = setup(tmp.path());
+    let topic = tmp.path().join("topic: #1");
+    fs::create_dir_all(&topic).unwrap();
+    let source = topic.join("# draft: true.png");
+    fs::write(&source, b"content").unwrap();
+
+    let mock = Mock::new();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+
+    let sidecar = frontmatter_json(&sidecar_path(&source));
+    assert_eq!(sidecar["source"], "# draft: true.png");
+    assert_eq!(sidecar["model"], cfg.model);
+    assert_eq!(sidecar["prompt_version"], cfg.prompt_version);
+
+    let rollup = frontmatter_json(&tmp.path().join("generated/topic: #1/transcript.md"));
+    assert_eq!(rollup["folder"], "topic: #1");
+    assert_eq!(rollup["kind"], "rollup");
+    assert_eq!(rollup["sections"], 1);
+
+    let second = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert_eq!(second.api_calls, 0);
+    assert_eq!(second.up_to_date, 1);
 }
 
 #[test]

@@ -25,18 +25,26 @@ corpus. New or changed content is transcribed once and gets a markdown
 
 ```markdown
 ---
-source: page.png
-sha256: 4f2a…
-model: google/gemini-2.5-flash
-backend: openrouter
-prompt_version: 1
-prompt_sha256: 8d7a…
-transcribed_at: 2026-06-11T10:00:00Z
-generator: transcriptd 0.1.0
+{
+  "backend": "openrouter",
+  "generator": "transcriptd 0.1.0",
+  "kind": "transcript",
+  "model": "google/gemini-2.5-flash",
+  "prompt_sha256": "8d7a…",
+  "prompt_version": "1",
+  "sha256": "4f2a…",
+  "source": "page.png",
+  "tags": ["transcriptd"],
+  "transcribed_at": "2026-06-11T10:00:00Z"
+}
 ---
 
 # Meeting notes …
 ```
+
+The frontmatter is JSON, which is valid YAML and is understood by Obsidian's
+Properties view. Encoding it structurally keeps filenames, folder names, and
+configuration values safe even when they contain YAML-significant characters.
 
 Only one sweep may operate on a watched folder at a time. A concurrent timer,
 watcher, or manual invocation exits with an error instead of duplicating API
