@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -91,6 +91,10 @@ pub fn scan(
     let mut outcome = ScanOutcome::default();
     // abs path -> content hash, for rollup stitching after the file pass
     let mut hashes: BTreeMap<PathBuf, String> = BTreeMap::new();
+    // Generated sidecar path -> current source hash. A None value means the
+    // source still exists but could not be checked this sweep (for example it
+    // is inside the stability window), so an existing sidecar is preserved.
+    let mut expected_sidecars: BTreeMap<PathBuf, Option<String>> = BTreeMap::new();
     let now = SystemTime::now();
     let max_bytes = cfg.max_file_mb * 1024 * 1024;
     let out_root = cfg.output_root(folder);
@@ -149,6 +153,9 @@ pub fn scan(
             continue;
         }
 
+        let sidecar = resolve_sidecar(folder, out_root.as_deref(), &path);
+        expected_sidecars.insert(sidecar.clone(), None);
+
         let meta = match fs::metadata(&path) {
             Ok(m) => m,
             Err(e) => {
@@ -187,13 +194,13 @@ pub fn scan(
                 continue;
             }
         };
+        expected_sidecars.insert(sidecar.clone(), Some(sha.clone()));
         hashes.insert(path.clone(), sha.clone());
 
         let mut needs_api = true;
         if let Some(entry) = ledger.entries.get(&sha).cloned() {
             // Hash already recorded: never re-sent to the API (R2).
-            let sc = resolve_sidecar(folder, out_root.as_deref(), &path);
-            if sidecar_matches(&sc, &sha) {
+            if sidecar_matches(&sidecar, &sha) {
                 state.log("DEBUG", &format!("up to date: {rel}"));
                 outcome.up_to_date += 1;
                 needs_api = false;
@@ -206,7 +213,7 @@ pub fn scan(
                     &entry.transcribed_at,
                     &md,
                 );
-                write_output(&sc, content.as_bytes())?;
+                write_output(&sidecar, content.as_bytes())?;
                 state.log("INFO", &format!("rebuilt sidecar from cache: {rel}"));
                 outcome.reused += 1;
                 needs_api = false;
@@ -267,10 +274,7 @@ pub fn scan(
                     &transcribed_at,
                     &out.markdown,
                 );
-                write_output(
-                    &resolve_sidecar(folder, out_root.as_deref(), &path),
-                    content.as_bytes(),
-                )?;
+                write_output(&sidecar, content.as_bytes())?;
                 ledger.entries.insert(
                     sha.clone(),
                     LedgerEntry {
@@ -304,7 +308,20 @@ pub fn scan(
         }
     }
 
-    outcome.rollups_written = stitch_rollups(folder, cfg, state, &hashes)?;
+    reconcile_sidecars(
+        folder,
+        out_root.as_deref().unwrap_or(folder),
+        state,
+        &expected_sidecars,
+    )?;
+
+    let rollups = stitch_rollups(folder, cfg, state, &hashes)?;
+    outcome.rollups_written = rollups.written;
+    let rollup_root = cfg
+        .rollup_root(folder)
+        .or_else(|| cfg.output_root(folder))
+        .unwrap_or_else(|| folder.to_path_buf());
+    reconcile_rollups(folder, &rollup_root, state, &rollups.expected)?;
 
     ledger.save(state)?;
     failures.save(state)?;
@@ -375,6 +392,106 @@ fn sidecar_matches(sidecar: &Path, sha: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Remove generated sidecars whose source disappeared or whose recorded hash
+/// no longer matches the current source. This prevents stale content from
+/// remaining searchable after a deletion or failed re-transcription.
+fn reconcile_sidecars(
+    folder: &Path,
+    output_root: &Path,
+    state: &StateDir,
+    expected: &BTreeMap<PathBuf, Option<String>>,
+) -> Result<()> {
+    for path in generated_markdown_files(output_root) {
+        let Some(recorded_sha) = managed_sidecar_sha(&path) else {
+            continue;
+        };
+        let keep = match expected.get(&path) {
+            Some(Some(current_sha)) => current_sha == &recorded_sha,
+            Some(None) => true,
+            None => false,
+        };
+        if !keep {
+            fs::remove_file(&path).with_context(|| format!("removing stale {}", path.display()))?;
+            state.log(
+                "INFO",
+                &format!("removed stale sidecar: {}", display_output(folder, &path)),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn reconcile_rollups(
+    folder: &Path,
+    rollup_root: &Path,
+    state: &StateDir,
+    expected: &BTreeSet<PathBuf>,
+) -> Result<()> {
+    for path in generated_markdown_files(rollup_root) {
+        if !expected.contains(&path) && is_managed_rollup(&path) {
+            fs::remove_file(&path).with_context(|| format!("removing stale {}", path.display()))?;
+            state.log(
+                "INFO",
+                &format!("removed stale rollup: {}", display_output(folder, &path)),
+            );
+        }
+    }
+    Ok(())
+}
+
+fn generated_markdown_files(root: &Path) -> Vec<PathBuf> {
+    if !root.exists() {
+        return Vec::new();
+    }
+    WalkDir::new(root)
+        .into_iter()
+        .filter_entry(|e| !is_hidden(e))
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| entry.file_type().is_file())
+        .map(|entry| entry.into_path())
+        .filter(|path| matches!(classify(path), FileKind::Markdown))
+        .collect()
+}
+
+fn managed_sidecar_sha(path: &Path) -> Option<String> {
+    let text = fs::read_to_string(path).ok()?;
+    let frontmatter = markdown_frontmatter(&text)?;
+    if !frontmatter
+        .lines()
+        .any(|line| line.starts_with("generator: transcriptd "))
+    {
+        return None;
+    }
+    frontmatter
+        .lines()
+        .find_map(|line| line.strip_prefix("sha256: ").map(str::to_string))
+}
+
+fn is_managed_rollup(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| markdown_frontmatter(&text).map(str::to_string))
+        .is_some_and(|frontmatter| {
+            frontmatter
+                .lines()
+                .any(|line| line.starts_with("generator: transcriptd "))
+                && frontmatter.lines().any(|line| line == "kind: rollup")
+        })
+}
+
+fn markdown_frontmatter(markdown: &str) -> Option<&str> {
+    let rest = markdown.strip_prefix("---\n")?;
+    rest.split_once("\n---\n")
+        .map(|(frontmatter, _)| frontmatter)
+}
+
+fn display_output(folder: &Path, path: &Path) -> String {
+    path.strip_prefix(folder)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .to_string()
+}
+
 /// Recover a transcript without an API call: from the markdown cache, or by
 /// re-extracting from the retained raw response (R7) if the cache was lost.
 fn cached_markdown(state: &StateDir, sha: &str) -> Option<String> {
@@ -411,18 +528,26 @@ fn sidecar_content(
 /// in filename order. Pure reassembly from cache — zero API calls (R9).
 /// With rollup_dir set, marker semantics are replaced: every folder rolls up
 /// into the rollup tree instead.
+struct RollupOutcome {
+    written: usize,
+    expected: BTreeSet<PathBuf>,
+}
+
 fn stitch_rollups(
     folder: &Path,
     cfg: &Config,
     state: &StateDir,
     hashes: &BTreeMap<PathBuf, String>,
-) -> Result<usize> {
+) -> Result<RollupOutcome> {
     if let Some(rollup_root) = cfg.rollup_root(folder) {
         return stitch_every_folder(folder, cfg, state, hashes, &rollup_root);
     }
     let marked = find_marked_folders(folder, &cfg.marker);
     if marked.is_empty() {
-        return Ok(0);
+        return Ok(RollupOutcome {
+            written: 0,
+            expected: BTreeSet::new(),
+        });
     }
 
     // Each file belongs to its nearest marked ancestor only.
@@ -434,6 +559,7 @@ fn stitch_rollups(
     }
 
     let mut written = 0;
+    let mut expected = BTreeSet::new();
     for marked_folder in &marked {
         let members = groups.get(marked_folder).cloned().unwrap_or_default();
         let mut sections = Vec::new();
@@ -473,6 +599,7 @@ fn stitch_rollups(
                 .join(&cfg.rollup_name),
         };
         let existing = fs::read_to_string(&rollup_path).unwrap_or_default();
+        expected.insert(rollup_path.clone());
         if existing != content {
             write_output(&rollup_path, content.as_bytes())?;
             state.log(
@@ -482,7 +609,7 @@ fn stitch_rollups(
             written += 1;
         }
     }
-    Ok(written)
+    Ok(RollupOutcome { written, expected })
 }
 
 /// rollup_dir mode: every folder containing transcribable files gets a
@@ -495,7 +622,7 @@ fn stitch_every_folder(
     state: &StateDir,
     hashes: &BTreeMap<PathBuf, String>,
     rollup_root: &Path,
-) -> Result<usize> {
+) -> Result<RollupOutcome> {
     // Group by direct parent; BTreeMap iteration keeps filename order.
     let mut groups: BTreeMap<PathBuf, Vec<(&PathBuf, &String)>> = BTreeMap::new();
     for (path, sha) in hashes {
@@ -508,6 +635,7 @@ fn stitch_every_folder(
     }
 
     let mut written = 0;
+    let mut expected = BTreeSet::new();
     for (dir, members) in &groups {
         let mut sections = Vec::new();
         for (path, sha) in members {
@@ -537,6 +665,7 @@ fn stitch_every_folder(
         );
         let rollup_path = rollup_root.join(rel).join(&cfg.rollup_name);
         let existing = fs::read_to_string(&rollup_path).unwrap_or_default();
+        expected.insert(rollup_path.clone());
         if existing != content {
             write_output(&rollup_path, content.as_bytes())?;
             state.log(
@@ -546,7 +675,7 @@ fn stitch_every_folder(
             written += 1;
         }
     }
-    Ok(written)
+    Ok(RollupOutcome { written, expected })
 }
 
 fn find_marked_folders(folder: &Path, marker: &str) -> Vec<PathBuf> {

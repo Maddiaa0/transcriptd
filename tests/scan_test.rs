@@ -362,6 +362,77 @@ fn renamed_file_reuses_cache_without_api_call() {
 }
 
 #[test]
+fn changed_source_failure_removes_the_old_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = test_config();
+    let state = setup(tmp.path());
+    let source = tmp.path().join("page.png");
+    fs::write(&source, b"original").unwrap();
+
+    let mock = Mock::new();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    let sidecar = sidecar_path(&source);
+    assert!(sidecar.exists());
+
+    fs::write(&source, b"changed").unwrap();
+    mock.fail_on("page.png");
+    let outcome = scan(tmp.path(), &cfg, &state, &mock).unwrap();
+
+    assert_eq!(outcome.failed, 1);
+    assert!(
+        !sidecar.exists(),
+        "a stale successful transcript must not survive"
+    );
+}
+
+#[test]
+fn deleting_a_source_removes_its_generated_outputs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = Config {
+        output_dir: Some("generated".to_string()),
+        rollup_dir: Some("generated".to_string()),
+        ..test_config()
+    };
+    let state = setup(tmp.path());
+    let source = tmp.path().join("topic/page.png");
+    fs::create_dir_all(source.parent().unwrap()).unwrap();
+    fs::write(&source, b"page").unwrap();
+
+    let mock = Mock::new();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    let sidecar = tmp.path().join("generated/topic/page.png.md");
+    let rollup = tmp.path().join("generated/topic/transcript.md");
+    assert!(sidecar.exists());
+    assert!(rollup.exists());
+
+    fs::remove_file(source).unwrap();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+
+    assert!(!sidecar.exists());
+    assert!(!rollup.exists());
+}
+
+#[test]
+fn removing_a_document_marker_removes_its_rollup() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = test_config();
+    let state = setup(tmp.path());
+    let doc = tmp.path().join("notebook");
+    fs::create_dir(&doc).unwrap();
+    fs::write(doc.join("index.md"), &cfg.marker).unwrap();
+    fs::write(doc.join("page.png"), b"page").unwrap();
+
+    let mock = Mock::new();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    let rollup = doc.join(&cfg.rollup_name);
+    assert!(rollup.exists());
+
+    fs::write(doc.join("index.md"), "# Ordinary folder").unwrap();
+    scan(tmp.path(), &cfg, &state, &mock).unwrap();
+    assert!(!rollup.exists());
+}
+
+#[test]
 fn markdown_and_hidden_files_are_never_transcribed() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = test_config();
